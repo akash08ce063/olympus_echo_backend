@@ -1,0 +1,17 @@
+{
+	"phone_number_to_call": "+13434538795",
+	"agents": [
+		{
+			"name": "TestAgent",
+			"prompt": "You are a helpful assistant. Say hello and goodbye. Then immediately hang up the call.",
+			"voice_id": "b7d50908-b17c-442d-ad8d-810c63997ed9"
+		}
+	],
+	"scenarios": [
+		{
+			"name": "TestScenario",
+			"prompt": "You are a helpful assistant. Call the user.",
+			"evaluations": []
+		}
+	]
+}
