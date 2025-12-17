@@ -1,16 +1,24 @@
+import asyncio
+import logging
 import os
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
 import ngrok
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
-from fixa import Agent, Evaluation, Scenario, Test, TestRunner
+from fastapi import FastAPI, HTTPException, Request
 from fixa.evaluators import LocalEvaluator
+from loguru import logger
 from pydantic import BaseModel
+from sse_starlette.sse import EventSourceResponse
+
+from fixa import Agent, Evaluation, Scenario, Test, TestRunner
 
 # Load environment variables
 load_dotenv(override=True)
+
+# Suppress noisy Deepgram SDK logs
+logging.getLogger("deepgram").setLevel(logging.CRITICAL)
 
 
 # Pydantic Models
@@ -56,7 +64,30 @@ class TestResponse(BaseModel):
 DEFAULT_VOICE_ID = "b7d50908-b17c-442d-ad8d-810c63997ed9"
 
 
+# Log Streaming Setup
+log_queue: asyncio.Queue = asyncio.Queue()
+
+
+def sink(message):
+    """
+    Loguru sink that puts log records into an async queue.
+    The message object from loguru is a string-like object with .record dict.
+    """
+    try:
+        # We can put the raw string or structured data
+        asyncio.create_task(log_queue.put(str(message)))
+    except Exception:
+        # Fallback if loop isn't running or other error
+        pass
+
+
+# Configure loguru to use our sink (broadcasts logs to the queue)
+logger.add(sink, format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}")
+
+
 # Lifespan Manager for persistent Infrastructure
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: Initialize ngrok
@@ -105,33 +136,69 @@ def make_serializable(res: Any) -> TestResultModel:
         pass
 
     # Safe extraction
+    # The result object might wrap 'test' which contains agent/scenario
+    test_obj = getattr(res, "test", None)
+
     agent_obj = getattr(res, "agent", None)
+    if not agent_obj and test_obj:
+        agent_obj = getattr(test_obj, "agent", None)
     agent_name = getattr(agent_obj, "name", "Unknown") if agent_obj else "Unknown"
 
     scenario_obj = getattr(res, "scenario", None)
+    if not scenario_obj and test_obj:
+        scenario_obj = getattr(test_obj, "scenario", None)
     scenario_name = getattr(scenario_obj, "name", "Unknown") if scenario_obj else "Unknown"
+
+    transcript = getattr(res, "transcript", "")
+    if isinstance(transcript, list):
+        # Convert list of dicts (e.g. [{'role': '...', 'content': '...'}]) to string
+        formatted = []
+        for msg in transcript:
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+            formatted.append(f"{role.capitalize()}: {content}")
+        transcript = "\n".join(formatted)
+    elif not transcript:
+        transcript = ""
 
     return TestResultModel(
         agent=agent_name,
         scenario=scenario_name,
         passed=getattr(res, "passed", False),
-        transcript=getattr(res, "transcript", "") or "",
+        transcript=transcript,
         recording_url=getattr(res, "recording_url", "") or "",
         error=getattr(res, "error", None),
         evaluations=getattr(res, "evaluations", {}) or {},
     )
 
 
+@app.get("/logs")
+async def logs(request: Request):
+    """
+    SSE endpoint to stream logs to the client.
+    """
+
+    async def event_generator():
+        while True:
+            # Check if client disconnected
+            if await request.is_disconnected():
+                break
+
+            # Wait for log message
+            message = await log_queue.get()
+            yield {"data": message}
+
+    return EventSourceResponse(event_generator())
+
+
 @app.post("/test", response_model=TestResponse)
 async def run_test(config: TestConfig):
     if not app.state.ngrok_url:
-        raise HTTPException(status_code=500,
-                            detail="Ngrok tunnel is not active")
+        raise HTTPException(status_code=500, detail="Ngrok tunnel is not active")
 
     # Determine phone numbers
     phone_number_to_call = config.phone_number_to_call
-    twilio_phone_number = config.twilio_phone_number or os.getenv(
-        "TWILIO_PHONE_NUMBER") or "+15554443333"
+    twilio_phone_number = config.twilio_phone_number or os.getenv("TWILIO_PHONE_NUMBER") or "+15554443333"
 
     print(f"DEBUG: Using From Number: {twilio_phone_number}")
     print(f"DEBUG: Using To Number: {phone_number_to_call}")
@@ -150,8 +217,7 @@ async def run_test(config: TestConfig):
         evals = []
         for e in s.evaluations:
             evals.append(Evaluation(name=e.name, prompt=e.prompt))
-        scenarios.append(
-            Scenario(name=s.name, prompt=s.prompt, evaluations=evals))
+        scenarios.append(Scenario(name=s.name, prompt=s.prompt, evaluations=evals))
 
     # 3. Initialize TestRunner (using persistent ngrok url)
     test_runner = TestRunner(
@@ -174,11 +240,11 @@ async def run_test(config: TestConfig):
             type=TestRunner.OUTBOUND,
         )
     except Exception as e:
-        raise HTTPException(status_code=500,
-                            detail=f"Error running tests: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error running tests: {str(e)}")
 
     # 6. Serialize Results
     serialized_results = []
+
     if isinstance(raw_results, list):
         for res in raw_results:
             serialized_results.append(make_serializable(res))

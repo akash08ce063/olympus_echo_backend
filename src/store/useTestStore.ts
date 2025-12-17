@@ -31,7 +31,8 @@ export interface TestResult {
   results: {
     agent: string
     scenario: string
-    transcript: string
+    transcript: string | any[] // Update transcript type to allow array too since we changed backend
+    recording_url?: string
     evaluations: Record<string, { passed: boolean; reasoning: string }>
   }[]
 }
@@ -121,4 +122,3 @@ export const useTestStore = create<TestStore>((set) => ({
   addLog: (log) => set((state) => ({ logs: [...state.logs, log] })),
   clearLogs: () => set({ logs: [] }),
 }))
-
