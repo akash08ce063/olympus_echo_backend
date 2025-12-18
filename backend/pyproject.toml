@@ -1,5 +1,5 @@
 [project]
-name = "agent-to-agent-testing"
+name = "pranthora-agent-to-agent-testing"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"

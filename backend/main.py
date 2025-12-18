@@ -144,10 +144,42 @@ async def lifespan(app: FastAPI):
         app.state.ngrok_url = None
         app.state.ngrok_listener = None
 
+    # Startup: Initialize TestRunner and start its server
+    # This server will be shared across all test requests
+    if app.state.ngrok_url:
+        try:
+            print("Initializing shared TestRunner...")
+            twilio_phone_number = os.getenv("TWILIO_PHONE_NUMBER") or "+15554443333"
+            test_runner = TestRunner(
+                port=ngrok_port,
+                ngrok_url=app.state.ngrok_url,
+                twilio_phone_number=twilio_phone_number,
+                evaluator=LocalEvaluator(),
+            )
+            # Start the TestRunner's server once
+            await test_runner._start_server()
+            app.state.test_runner = test_runner
+            print(f"TestRunner initialized and server started on port {ngrok_port}")
+        except Exception as e:
+            print(f"Failed to initialize TestRunner: {e}")
+            app.state.test_runner = None
+    else:
+        print("Skipping TestRunner initialization (ngrok not available)")
+        app.state.test_runner = None
+
     yield
 
     # Shutdown: Cleanup resources
     print("Shutting down...")
+
+    # Stop TestRunner server
+    if hasattr(app.state, "test_runner") and app.state.test_runner:
+        try:
+            print("Stopping TestRunner server...")
+            await app.state.test_runner._stop_server()
+            print("TestRunner server stopped")
+        except Exception as e:
+            print(f"Error stopping TestRunner server: {e}")
 
     # Close ngrok tunnel
     if hasattr(app.state, "ngrok_listener") and app.state.ngrok_listener:
@@ -279,9 +311,10 @@ async def logs(request: Request):
     return EventSourceResponse(event_generator())
 
 
-async def run_tests_background(config: TestConfig, ngrok_url: str, ngrok_port: int, job_id: str):
+async def run_tests_background(config: TestConfig, test_runner: TestRunner, job_id: str):
     """
     Background task to run tests and push results to SSE.
+    Uses the shared TestRunner instance.
     """
     global log_queue
     if not log_queue:
@@ -299,7 +332,6 @@ async def run_tests_background(config: TestConfig, ngrok_url: str, ngrok_port: i
         active_pairs.clear()
 
         phone_number_to_call = config.phone_number_to_call
-        twilio_phone_number = config.twilio_phone_number or os.getenv("TWILIO_PHONE_NUMBER") or "+15554443333"
 
         # 1. Create Agents
         agents = []
@@ -317,21 +349,16 @@ async def run_tests_background(config: TestConfig, ngrok_url: str, ngrok_port: i
                 evals.append(Evaluation(name=e.name, prompt=e.prompt))
             scenarios.append(Scenario(name=s.name, prompt=s.prompt, evaluations=evals))
 
-        # 3. Initialize TestRunner
-        test_runner = TestRunner(
-            port=ngrok_port,
-            ngrok_url=ngrok_url,
-            twilio_phone_number=twilio_phone_number,
-            evaluator=LocalEvaluator(),
-        )
+        # 3. Clear previous tests from the shared TestRunner
+        test_runner.tests.clear()
 
-        # 4. Add Tests
+        # 4. Add Tests to the shared TestRunner
         for scenario in scenarios:
             for agent in agents:
                 test = Test(scenario=scenario, agent=agent)
                 test_runner.add_test(test)
 
-        # 5. Run Tests
+        # 5. Run Tests (using the shared server, no need to start/stop)
         raw_results = await test_runner.run_tests(
             phone_number=phone_number_to_call,
             type=TestRunner.OUTBOUND,
@@ -354,24 +381,25 @@ async def run_tests_background(config: TestConfig, ngrok_url: str, ngrok_port: i
         # Push Result Event
         print(f"Job {job_id}: Tests finished. Pushing results.")
         await log_queue.put({"type": "result", "payload": response_payload})
-
         await log_queue.put({"type": "log", "payload": f"Job {job_id}: Results pushed to client."})
 
     except Exception as e:
         error_msg = f"Error running tests: {str(e)}"
         print(f"Job {job_id} Failed: {error_msg}")
         await log_queue.put({"type": "error", "payload": error_msg})
+    finally:
+        await log_queue.put({"type": "log", "payload": f"Job {job_id}: Test execution finished."})
 
 
 @app.post("/test", response_model=JobStartedResponse, status_code=202)
 async def run_test(config: TestConfig, background_tasks: BackgroundTasks):
-    if not app.state.ngrok_url:
-        raise HTTPException(status_code=500, detail="Ngrok tunnel is not active")
+    if not app.state.test_runner:
+        raise HTTPException(status_code=500, detail="TestRunner is not initialized")
 
     job_id = os.urandom(4).hex()  # Simple ID
 
-    # Schedule background task
-    background_tasks.add_task(run_tests_background, config=config, ngrok_url=app.state.ngrok_url, ngrok_port=app.state.ngrok_port, job_id=job_id)
+    # Schedule background task with the shared TestRunner
+    background_tasks.add_task(run_tests_background, config=config, test_runner=app.state.test_runner, job_id=job_id)
 
     return JobStartedResponse(message="Test execution started in background", job_id=job_id)
 
