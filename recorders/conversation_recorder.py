@@ -51,10 +51,13 @@ class ConversationRecorder:
         self.recording_dir = Path(recording_path)
         # Note: Directory creation will be done async in open() to avoid blocking
 
-        # Generate filename with timestamp
+        # Generate filenames with timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.filename = f"{conversation_id}_{timestamp}.wav"
-        self.filepath = self.recording_dir / self.filename
+        self.filepath_agent_a = self.recording_dir / f"{conversation_id}_{timestamp}_agent_a.wav"
+        self.filepath_agent_b = self.recording_dir / f"{conversation_id}_{timestamp}_agent_b.wav"
+        self.filepath_merged = self.recording_dir / f"{conversation_id}_{timestamp}.wav"
+        # Keep filepath for backward compatibility (points to merged file)
+        self.filepath = self.filepath_merged
 
         # Thread safety for concurrent writes
         self._lock = Lock()
@@ -69,7 +72,7 @@ class ConversationRecorder:
         self._write_task: Optional[asyncio.Task] = None
         self._stop_writing = asyncio.Event()
 
-        logger.info(f"[{conversation_id}] Recorder initialized: {self.filepath}")
+        logger.info(f"[{conversation_id}] Recorder initialized: {self.filepath_merged}")
 
     async def open(self) -> bool:
         """
@@ -89,13 +92,13 @@ class ConversationRecorder:
                 self._stop_writing.clear()
                 # Start background task to write audio chunks
                 self._write_task = asyncio.create_task(self._write_audio_loop())
-                logger.info(f"[{self.conversation_id}] Recording started: {self.filepath}")
+                logger.info(f"[{self.conversation_id}] Recording started: {self.filepath_merged}")
                 return True
         except Exception as e:
             logger.error(f"[{self.conversation_id}] Failed to open recording file: {e}")
             return False
 
-    async def write_audio(self, audio_data: bytes) -> None:
+    async def write_audio(self, audio_data: bytes, source: Optional[str] = None) -> None:
         """
         Queue audio data for writing to the recording file.
 
@@ -104,16 +107,17 @@ class ConversationRecorder:
 
         Args:
             audio_data: Raw PCM audio bytes to write
+            source: Source direction identifier (e.g., "A->B" or "B->A")
         """
         if not self._is_open:
             logger.warning(f"[{self.conversation_id}] Attempted to write to closed recorder")
             return
 
         try:
-            # Append to buffer queue with timestamp
+            # Append to buffer queue with timestamp and source
             timestamp = time.time()
             async with self._buffer_lock:
-                self._audio_buffer.append((timestamp, audio_data))
+                self._audio_buffer.append((timestamp, audio_data, source))
                 self._current_buffer_size += len(audio_data)
 
                 # Trigger flush if buffer size limit reached
@@ -142,6 +146,24 @@ class ConversationRecorder:
         # Final flush of any remaining chunks
         await self._flush_buffer()
 
+        # Merge the separate audio files into a single mixed recording
+        try:
+            from utils.audio_utils import AudioUtils
+
+            # Check if both separate files exist
+            if self.filepath_agent_a.exists() or self.filepath_agent_b.exists():
+                await asyncio.to_thread(
+                    AudioUtils.merge_audio_files,
+                    str(self.filepath_agent_a),
+                    str(self.filepath_agent_b),
+                    str(self.filepath_merged),
+                    self.sample_rate,
+                    self.sample_width,
+                )
+                logger.info(f"[{self.conversation_id}] Merged audio files into: {self.filepath_merged}")
+        except Exception as e:
+            logger.error(f"[{self.conversation_id}] Error merging audio files: {e}. Separate files preserved.")
+
         try:
             # File operations are handled by AudioUtils, just mark as closed
             def _close_file():
@@ -151,10 +173,10 @@ class ConversationRecorder:
                         self._wav_file = None
                     self._is_open = False
 
-                    # Log file size
-                    if self.filepath.exists():
-                        size_mb = self.filepath.stat().st_size / (1024 * 1024)
-                        logger.info(f"[{self.conversation_id}] Recording saved: {self.filepath} ({size_mb:.2f} MB)")
+                    # Log file size of merged file
+                    if self.filepath_merged.exists():
+                        size_mb = self.filepath_merged.stat().st_size / (1024 * 1024)
+                        logger.info(f"[{self.conversation_id}] Recording saved: {self.filepath_merged} ({size_mb:.2f} MB)")
 
             await asyncio.to_thread(_close_file)
         except Exception as e:
@@ -164,8 +186,8 @@ class ConversationRecorder:
         """
         Flush buffered audio chunks to file.
 
-        This method extracts chunks from the buffer, sorts them by timestamp,
-        and writes them using batch conversion pattern (combine all -> convert all -> write all).
+        This method extracts chunks from the buffer, groups them by source,
+        and writes them to separate files for each direction.
         """
         async with self._buffer_lock:
             if not self._audio_buffer:
@@ -179,34 +201,48 @@ class ConversationRecorder:
         # Sort chunks by timestamp to maintain chronological order
         chunks.sort(key=lambda x: x[0])  # Sort by timestamp
 
-        # Extract raw audio data (before conversion) - batch conversion will happen in utility
-        raw_audio_chunks = [audio_data for _, audio_data in chunks]
+        # Group chunks by source direction
+        agent_a_chunks = [(t, data) for t, data, src in chunks if src == "A->B"]
+        agent_b_chunks = [(t, data) for t, data, src in chunks if src == "B->A"]
 
-        # Write all chunks using batch conversion pattern
-        if raw_audio_chunks:
-            try:
-                from utils.audio_utils import AudioUtils
+        # Write each direction to separate files
+        try:
+            from utils.audio_utils import AudioUtils
 
-                # Close the file handle if it's open (AudioUtils will handle file operations)
-                if self._wav_file is not None:
-                    with self._lock:
-                        if self._wav_file is not None:
-                            self._wav_file.close()
-                            self._wav_file = None
+            # Close the file handle if it's open (AudioUtils will handle file operations)
+            if self._wav_file is not None:
+                with self._lock:
+                    if self._wav_file is not None:
+                        self._wav_file.close()
+                        self._wav_file = None
 
-                # Use AudioUtils to batch convert and write
-                # Base class assumes audio is already in PCM format
+            # Write Agent A audio (A->B direction)
+            if agent_a_chunks:
+                raw_audio_chunks_a = [audio_data for _, audio_data in agent_a_chunks]
                 await asyncio.to_thread(
                     AudioUtils.to_thread_flush_audio_frames,
-                    raw_audio_chunks,
-                    str(self.filepath),
+                    raw_audio_chunks_a,
+                    str(self.filepath_agent_a),
                     self.sample_rate,
                     self.channels,
                     self.sample_width,
                     convert_mulaw=False,
                 )
-            except Exception as e:
-                logger.error(f"[{self.conversation_id}] Error writing buffered audio: {e}")
+
+            # Write Agent B audio (B->A direction)
+            if agent_b_chunks:
+                raw_audio_chunks_b = [audio_data for _, audio_data in agent_b_chunks]
+                await asyncio.to_thread(
+                    AudioUtils.to_thread_flush_audio_frames,
+                    raw_audio_chunks_b,
+                    str(self.filepath_agent_b),
+                    self.sample_rate,
+                    self.channels,
+                    self.sample_width,
+                    convert_mulaw=False,
+                )
+        except Exception as e:
+            logger.error(f"[{self.conversation_id}] Error writing buffered audio: {e}")
 
     async def _convert_audio(self, audio_data: bytes) -> bytes:
         """

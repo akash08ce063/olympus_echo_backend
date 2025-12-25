@@ -152,7 +152,7 @@ class BaseBridge:
     async def _record_and_track_audio(self, audio_data: bytes, source_name: str) -> None:
         """Record audio and update statistics."""
         if self._recorder and self._recorder.is_open:
-            await self._recorder.write_audio(audio_data)
+            await self._recorder.write_audio(audio_data, source_name)
 
         # Track first audio timestamp
         if self.stats.first_audio_at is None:
@@ -320,7 +320,7 @@ class BaseBridge:
         if self.recording_enabled:
             status_dict["recording"] = {
                 "enabled": True,
-                "file_path": str(self._recorder.filepath) if self._recorder else None,
+                "file_path": str(self._recorder.filepath_merged) if self._recorder else None,
                 "is_recording": self._recorder.is_open if self._recorder else False,
             }
         else:

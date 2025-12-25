@@ -44,7 +44,7 @@ class TwilioConversationRecorder(ConversationRecorder):
         """
         Flush buffered audio chunks to file.
 
-        Override to handle mulaw conversion for Twilio audio.
+        Override to handle mulaw conversion for Twilio audio and write to separate files.
         """
         async with self._buffer_lock:
             if not self._audio_buffer:
@@ -58,28 +58,43 @@ class TwilioConversationRecorder(ConversationRecorder):
         # Sort chunks by timestamp to maintain chronological order
         chunks.sort(key=lambda x: x[0])  # Sort by timestamp
 
-        # Extract raw audio data (mulaw format from Twilio)
-        raw_audio_chunks = [audio_data for _, audio_data in chunks]
+        # Group chunks by source direction
+        agent_a_chunks = [(t, data) for t, data, src in chunks if src == "A->B"]
+        agent_b_chunks = [(t, data) for t, data, src in chunks if src == "B->A"]
 
-        # Write all chunks using batch conversion pattern with mulaw conversion
-        if raw_audio_chunks:
-            try:
-                # Close the file handle if it's open (AudioUtils will handle file operations)
-                if self._wav_file is not None:
-                    with self._lock:
-                        if self._wav_file is not None:
-                            self._wav_file.close()
-                            self._wav_file = None
+        # Write each direction to separate files with mulaw conversion
+        try:
+            # Close the file handle if it's open (AudioUtils will handle file operations)
+            if self._wav_file is not None:
+                with self._lock:
+                    if self._wav_file is not None:
+                        self._wav_file.close()
+                        self._wav_file = None
 
-                # Use AudioUtils to batch convert mulaw to PCM and write
+            # Write Agent A audio (A->B direction) with mulaw conversion
+            if agent_a_chunks:
+                raw_audio_chunks_a = [audio_data for _, audio_data in agent_a_chunks]
                 await asyncio.to_thread(
                     AudioUtils.to_thread_flush_audio_frames,
-                    raw_audio_chunks,
-                    str(self.filepath),
+                    raw_audio_chunks_a,
+                    str(self.filepath_agent_a),
                     self.sample_rate,
                     self.channels,
                     self.sample_width,
                     convert_mulaw=True,  # Twilio audio is in mulaw format
                 )
-            except Exception as e:
-                logger.error(f"[{self.conversation_id}] Error writing buffered audio: {e}")
+
+            # Write Agent B audio (B->A direction) with mulaw conversion
+            if agent_b_chunks:
+                raw_audio_chunks_b = [audio_data for _, audio_data in agent_b_chunks]
+                await asyncio.to_thread(
+                    AudioUtils.to_thread_flush_audio_frames,
+                    raw_audio_chunks_b,
+                    str(self.filepath_agent_b),
+                    self.sample_rate,
+                    self.channels,
+                    self.sample_width,
+                    convert_mulaw=True,  # Twilio audio is in mulaw format
+                )
+        except Exception as e:
+            logger.error(f"[{self.conversation_id}] Error writing buffered audio: {e}")
