@@ -5,15 +5,20 @@ A service that enables two voice agents to have real-time audio conversations by
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Agent Bridge Service                         │
-│                                                                  │
-│   ┌─────────────┐      ┌──────────┐      ┌─────────────┐        │
-│   │  Transport  │◄────►│  Bridge  │◄────►│  Transport  │        │
-│   │  (WS/Twilio)│      │  (Core)  │      │  (WS/Twilio)│        │
-│   └─────────────┘      └──────────┘      └─────────────┘        │
-│         ▲                                       ▲                │
-└─────────┼───────────────────────────────────────┼────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│                     Agent Bridge Service                       │
+│                                                                │
+│   ┌─────────────┐      ┌──────────┐      ┌─────────────┐       │
+│   │  Transport  │◄────►│  Bridge  │◄────►│  Transport  │       │
+│   │  (WS/Twilio)│      │  (Core)  │      │  (WS/Twilio)│       │
+│   └─────────────┘      └────┬─────┘      └─────────────┘       │
+│         ▲                   │                   ▲              │
+│         │                   ▼                   │              │
+│         │             ┌──────────┐              │              │
+│         │             │ Recorder │              │              │
+│         │             │  (Audio) │              │              │
+│         │             └──────────┘              │              │
+└─────────┼───────────────────────────────────────┼──────────────┘
           │                                       │
      ┌────▼────┐                             ┌────▼────┐
      │ Agent A │                             │ Agent B │
@@ -46,19 +51,62 @@ agent_bridge/
 
 ## Installation
 
+### 1. Set up virtual environment using uv
+
 ```bash
-pip install -r requirements.txt
+uv venv
+source .venv/bin/activate  # On Linux/Mac
+# or
+.venv\Scripts\activate     # On Windows
+```
+
+### 2. Install dependencies using uv
+
+```bash
+uv pip install -r requirements.txt
+```
+
+Alternatively, if you have a `pyproject.toml` file, you can use:
+
+```bash
+uv sync
 ```
 
 ## Running
 
+### 1. Configure environment variables
+
+Copy the example environment file and configure it with your values:
+
 ```bash
-python main.py                    # Default: 0.0.0.0:8080
-python main.py --port 9000        # Custom port
-python main.py --reload           # Dev mode
+cp .env.example .env
 ```
 
-API docs: `http://localhost:8080/docs`
+Edit `.env` and set your Twilio credentials and ngrok URLs. **Important**:
+- `TWILIO_WEBHOOK_BASE_URL` must use `https://` protocol
+- `TWILIO_WEBSOCKET_BASE_URL` must use `wss://` protocol
+
+### 2. Expose port 8000 using ngrok
+
+The app requires a publicly accessible URL for webhooks (especially for Twilio). Run ngrok in a separate terminal:
+
+```bash
+ngrok http 8000
+```
+
+This will provide a public URL (e.g., `https://abc123.ngrok.io`). Update your `.env` file with the ngrok URLs:
+- Use the `https://` URL for `TWILIO_WEBHOOK_BASE_URL`
+- Use the `wss://` URL (same domain) for `TWILIO_WEBSOCKET_BASE_URL`
+
+### 3. Run the application
+
+```bash
+uvicorn main:app --reload
+```
+
+The app will run on `http://localhost:8000` by default.
+
+API docs: `http://localhost:8000/docs`
 
 ## API Endpoints
 
@@ -86,12 +134,14 @@ GET /conversations
 
 ### Twilio Conversations
 
-Requires environment variables:
+Requires environment variables (see `.env.example` for template):
 - `TWILIO_ACCOUNT_SID`
 - `TWILIO_AUTH_TOKEN`
 - `TWILIO_PHONE_NUMBER`
-- `TWILIO_WEBHOOK_BASE_URL` (must be publicly accessible, for HTTP webhooks)
-- `TWILIO_WEBSOCKET_BASE_URL` (must be publicly accessible, for WebSocket media streams, e.g., `wss://your-domain.com`)
+- `TWILIO_WEBHOOK_BASE_URL` (must be publicly accessible, for HTTP webhooks - **must use `https://` protocol**, e.g., `https://abc123.ngrok.io`)
+- `TWILIO_WEBSOCKET_BASE_URL` (must be publicly accessible, for WebSocket media streams - **must use `wss://` protocol**, e.g., `wss://abc123.ngrok.io`)
+
+**Note**: Make sure to set these in your `.env` file as shown in `.env.example`. The webhook URL must use `https://` and the WebSocket URL must use `wss://`.
 
 ```bash
 # Start call
@@ -122,8 +172,9 @@ GET /health
 
 1. **API layer** creates the appropriate transports (WebSocket or Twilio)
 2. **Transports** are injected into the **Bridge**
-3. **Bridge** calls `transport.receive()` and `transport.send()` to route audio
-4. Bridge is completely unaware of transport implementation details
+3. **Bridge** calls `transport.receive()` and `transport.send()` to route audio between agents
+4. **Recorder** (if enabled) captures audio from both agents and saves it to WAV files
+5. Bridge is completely unaware of transport implementation details
 
 ## Adding a New Transport
 

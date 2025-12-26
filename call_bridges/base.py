@@ -6,6 +6,7 @@ by transport-specific bridge implementations (WebSocket, Twilio, etc.).
 """
 
 import asyncio
+from uuid import uuid4
 from datetime import datetime
 from typing import Callable, Optional
 
@@ -62,7 +63,7 @@ class BaseBridge:
                               Signature: (conversation_id, recording_path) -> ConversationRecorder
         """
         self.backend_url = backend_url
-        self.conversation_id = conversation_id or f"conv_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        self.conversation_id = conversation_id or f"conv_{uuid4().hex[:8]}"
         self.max_duration_seconds = max_duration_seconds
 
         # Create agent connections with injected transports

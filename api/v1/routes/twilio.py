@@ -3,7 +3,7 @@
 import asyncio
 import json
 import os
-from datetime import datetime
+from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
@@ -67,7 +67,7 @@ async def start_call(request: StartCallRequest):
             detail="Twilio not configured. Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER, TWILIO_WEBHOOK_BASE_URL, TWILIO_WEBSOCKET_BASE_URL",
         )
 
-    session_id = request.session_id or f"twilio_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    session_id = request.session_id or f"twilio_{uuid4().hex[:8]}"
 
     if session_id in active_bridges:
         raise HTTPException(status_code=409, detail=f"Session '{session_id}' already exists")
