@@ -18,9 +18,7 @@
 # from websockets.exceptions import ConnectionClosed
 
 # from services.audio_converter import AudioConverter, EncodingType, SampleRateType
-# from utils.logger import get_logger
 
-# logger = get_logger(__name__)
 
 
 # class ScaledTestingService:
@@ -435,9 +433,7 @@ import websockets
 from websockets.exceptions import ConnectionClosed
 
 from services.audio_converter import AudioConverter, EncodingType, SampleRateType
-from utils.logger import get_logger
-
-logger = get_logger(__name__)
+from telemetrics.logger import logger
 
 
 class ScaledTestingService:

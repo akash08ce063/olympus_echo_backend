@@ -15,9 +15,7 @@ try:
 except ImportError:
     LIBROSA_AVAILABLE = False
 
-from utils.logger import get_logger
-
-logger = get_logger(__name__)
+from telemetrics.logger import logger
 
 EncodingType = Literal["mulaw", "pcm16", "pcm"]
 SampleRateType = int

@@ -1,0 +1,18 @@
+2026-01-01 12:43:00 [INFO] logging:emit:1160 [PID:84589] [TID:8470126720] Testing info message
+2026-01-01 12:43:00 [WARNING] logging:emit:1160 [PID:84589] [TID:8470126720] Testing warning message
+2026-01-01 12:43:00 [ERROR] logging:emit:1160 [PID:84589] [TID:8470126720] Testing error message
+2026-01-01 12:43:00 [CRITICAL] logging:emit:1160 [PID:84589] [TID:8470126720] Testing critical message
+2026-01-01 12:43:00 [INFO] logging:emit:1160 [PID:84589] [TID:8470126720] Testing info with tag
+2026-01-01 12:43:00 [ERROR] logging:emit:1160 [PID:84589] [TID:8470126720] Testing error with tag
+[PARAM_TEST] 2026-01-01 12:43:00 [INFO] logging:emit:1160 [PID:84589] [TID:8470126720] Testing message parameter
+2026-01-01 12:47:07 [INFO] logging:emit:1160 [PID:85772] [TID:8470126720] Starting Voice Testing Platform on 0.0.0.0:8080
+2026-01-01 12:47:07 [INFO] logging:emit:1160 [PID:85772] [TID:8470126720] Voice Testing Platform startup
+2026-01-01 12:47:10 [INFO] logging:emit:1160 [PID:85772] [TID:8470126720] Voice Testing Platform shutdown
+2026-01-01 12:56:21 [INFO] logging:emit:1160 [PID:86221] [TID:8470126720] Starting Voice Testing Platform on 0.0.0.0:8080
+2026-01-01 12:56:21 [INFO] logging:emit:1160 [PID:86221] [TID:8470126720] Voice Testing Platform startup
+2026-01-01 13:01:52 [INFO] logging:emit:1160 [PID:86399] [TID:8470126720] Starting Voice Testing Platform on 0.0.0.0:8080
+2026-01-01 13:01:52 [INFO] logging:emit:1160 [PID:86399] [TID:8470126720] Voice Testing Platform startup
+2026-01-01 13:01:52 [INFO] logging:emit:1160 [PID:86399] [TID:8470126720] Voice Testing Platform shutdown
+2026-01-01 13:01:55 [INFO] logging:emit:1160 [PID:86221] [TID:8470126720] Voice Testing Platform shutdown
+2026-01-01 13:05:27 [INFO] logging:emit:1160 [PID:86720] [TID:8470126720] Starting Voice Testing Platform on 0.0.0.0:8080
+2026-01-01 13:05:27 [INFO] logging:emit:1160 [PID:86720] [TID:8470126720] Voice Testing Platform startup

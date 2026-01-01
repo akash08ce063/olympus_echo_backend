@@ -10,16 +10,16 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 
-from models.api import ScaledTestRequest, ScaledTestResponse
+from models.api import ScaledTestRequest, ScaledTestResponse, WebScaledTestRequest, WebScaledTestResponse
 from services.scaled_testing_service import ScaledTestingService
-from utils.logger import get_logger
-
-logger = get_logger(__name__)
+from services.web_scaled_testing_service import WebScaledTestingService
+from telemetrics.logger import logger
 
 router = APIRouter(prefix="/test-suites", tags=["Test Suites"])
 
 # Store active test sessions
 active_tests: dict[str, ScaledTestingService] = {}
+active_web_tests: dict[str, WebScaledTestingService] = {}
 
 
 @router.post("", response_model=ScaledTestResponse)
@@ -180,4 +180,102 @@ async def delete_test(test_id: str):
 
     del active_tests[test_id]
     return {"success": True, "message": f"Test '{test_id}' deleted"}
+
+
+@router.post("/web", response_model=WebScaledTestResponse)
+async def start_web_scaled_test(
+    request: WebScaledTestRequest,
+    background_tasks: BackgroundTasks,
+):
+    """
+    Start a scaled WebSocket test with concurrent connections.
+
+    This endpoint creates multiple parallel WebSocket connections between
+    target agent (media-stream endpoint, 8k mulaw) and user agent
+    (web-media-stream endpoint, 16k PCM). Uses the exact same logic as test.py.
+
+    Args:
+        request: Test configuration including agent URIs, concurrency, timeout, etc.
+        background_tasks: FastAPI background tasks for async execution
+
+    Returns:
+        Response with test ID and initial status
+    """
+    try:
+        # Validate inputs
+        if request.concurrent_requests < 1:
+            raise HTTPException(
+                status_code=400, detail="concurrent_requests must be at least 1"
+            )
+        if request.timeout < 1:
+            raise HTTPException(
+                status_code=400, detail="timeout must be at least 1 second"
+            )
+
+        # Create test service
+        test_service = WebScaledTestingService(
+            target_agent_uri=request.target_agent_uri,
+            user_agent_id=request.user_agent_id,
+            ws_url_base=request.ws_url_base,
+            recording_path="test_suite_recordings",
+        )
+
+        # Generate test ID
+        import uuid
+
+        test_id = str(uuid.uuid4())
+
+        # Store active test
+        active_web_tests[test_id] = test_service
+
+        # Run test in background
+        background_tasks.add_task(_run_web_test_async, test_service, test_id, request)
+
+        logger.info(
+            f"Started web scaled test: {test_id}, "
+            f"{request.concurrent_requests} concurrent connections, "
+            f"timeout: {request.timeout}s"
+        )
+
+        return WebScaledTestResponse(
+            success=True,
+            test_id=test_id,
+            message=f"Web scaled test started with {request.concurrent_requests} concurrent connections",
+            status={
+                "test_id": test_id,
+                "concurrent_requests": request.concurrent_requests,
+                "timeout": request.timeout,
+                "target_agent_uri": request.target_agent_uri,
+                "user_agent_id": request.user_agent_id,
+                "ws_url_base": request.ws_url_base,
+                "status": "running",
+            },
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error starting web scaled test: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to start test: {str(e)}")
+
+
+async def _run_web_test_async(
+    test_service: WebScaledTestingService,
+    test_id: str,
+    request: WebScaledTestRequest,
+):
+    """Run the web test asynchronously and store results."""
+    try:
+        result = await test_service.run_concurrent_test(
+            concurrent_requests=request.concurrent_requests,
+            timeout=request.timeout,
+            test_id=test_id,
+        )
+        logger.info(f"Web test {test_id} completed: {result}")
+    except Exception as e:
+        logger.error(f"Error running web test {test_id}: {e}")
+    finally:
+        # Remove from active tests after completion
+        if test_id in active_web_tests:
+            del active_web_tests[test_id]
 

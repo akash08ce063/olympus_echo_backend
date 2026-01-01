@@ -84,3 +84,34 @@ class ScaledTestResponse(BaseModel):
     test_id: str
     message: str
     status: dict
+
+
+class WebScaledTestRequest(BaseModel):
+    """Request model for starting a web scaled WebSocket test."""
+
+    target_agent_uri: str = Field(
+        ...,
+        description="WebSocket URL or agent ID for target agent (media-stream endpoint)",
+    )
+    user_agent_id: str = Field(
+        ..., description="Agent ID for user agent (web-media-stream endpoint)"
+    )
+    concurrent_requests: int = Field(
+        ..., ge=1, description="Number of parallel WebSocket connections"
+    )
+    timeout: int = Field(
+        ..., ge=1, description="Timeout in seconds after which all connections close"
+    )
+    ws_url_base: str = Field(
+        default="ws://localhost:5050",
+        description="Base WebSocket URL (default: ws://localhost:5050)",
+    )
+
+
+class WebScaledTestResponse(BaseModel):
+    """Response model for web scaled test operations."""
+
+    success: bool
+    test_id: str
+    message: str
+    status: dict
