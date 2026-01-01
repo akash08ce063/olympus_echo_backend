@@ -26,18 +26,24 @@ class UserAgentService(DatabaseService[UserAgent]):
 
     async def create_user_agent(self, user_id: UUID, data: UserAgentCreate) -> UUID:
         """Create a new user agent in both local DB and Pranthora."""
-        agent_data = data.model_dump()
-        agent_data["user_id"] = user_id
+        # Only include fields that exist in the database
+        agent_data = {
+            "user_id": str(user_id),
+            "name": data.name,
+            "system_prompt": data.system_prompt,
+            "evaluation_criteria": data.evaluation_criteria,
+            "pranthora_agent_id": None  # Will be set if Pranthora succeeds
+        }
 
         # First create agent in Pranthora
         async with PranthoraApiClient() as client:
             try:
                 pranthora_response = await client.create_agent({
                     "name": data.name,
-                    "description": data.description,
+                    "description": f"User agent: {data.name}",
                     "is_active": True,
                     "system_prompt": data.system_prompt,
-                    "model_config": data.model_config or {}
+                    "model_config": data.agent_model_config or {}
                 })
 
                 # Store Pranthora agent ID in our database
@@ -48,7 +54,7 @@ class UserAgentService(DatabaseService[UserAgent]):
                 logger.error(f"Failed to create agent in Pranthora: {e}")
                 # For now, allow creation without Pranthora agent
                 # In production, you might want to raise an error
-                agent_data["pranthora_agent_id"] = None
+                pass  # Don't set pranthora_agent_id if creation failed
 
         # Create agent in our local database
         local_agent_id = await self.create(agent_data)

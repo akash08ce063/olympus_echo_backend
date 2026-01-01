@@ -40,12 +40,11 @@ class TestSuiteListResponse(BaseModel):
 @router.post("", response_model=TestSuite)
 async def create_test_suite(
     data: TestSuiteCreate,
-    user_id: UUID = Query(..., description="User ID creating the test suite"),
     service: TestSuiteService = Depends(get_test_suite_service),
 ):
     """Create a new test suite."""
     try:
-        suite_id = await service.create_test_suite(user_id, data)
+        suite_id = await service.create_test_suite(data.user_id, data)
         suite = await service.get_test_suite(suite_id)
         if not suite:
             raise HTTPException(status_code=500, detail="Failed to retrieve created test suite")

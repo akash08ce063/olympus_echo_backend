@@ -1,167 +1,148 @@
 """
-Base database service for CRUD operations.
+Base database service for CRUD operations using Supabase.
 
 This module provides a base class for database operations
-with common CRUD functionality.
+with common CRUD functionality using Supabase client.
 """
 
-import os
 from abc import ABC, abstractmethod
 from typing import List, Optional, TypeVar, Generic, Dict, Any
 from uuid import UUID
+from datetime import datetime
 
-try:
-    import asyncpg
-    HAS_ASYNCPG = True
-except ImportError:
-    HAS_ASYNCPG = False
 from pydantic import BaseModel
-
+from data_layer.supabase_client import get_supabase_client
 from telemetrics.logger import logger
 
 T = TypeVar('T', bound=BaseModel)
 
 
 class DatabaseService(ABC, Generic[T]):
-    """Base class for database CRUD operations."""
+    """Base class for database CRUD operations using Supabase."""
 
     def __init__(self, table_name: str):
         self.table_name = table_name
-        self._pool: Optional[asyncpg.Pool] = None
+        self._client = None
 
-    async def _get_pool(self):
-        """Get database connection pool."""
-        if not HAS_ASYNCPG:
-            raise ImportError("asyncpg is required for database operations. Install it with: pip install asyncpg")
-
-        if self._pool is None:
-            # Get database URL from environment
-            database_url = os.getenv("DATABASE_URL")
-            if not database_url:
-                raise ValueError("DATABASE_URL environment variable not set")
-
-            self._pool = await asyncpg.create_pool(database_url)
-        return self._pool
+    async def _get_client(self):
+        """Get Supabase client instance."""
+        if self._client is None:
+            self._client = await get_supabase_client()
+        return self._client
 
     async def create(self, data: Dict[str, Any]) -> UUID:
         """Create a new record and return its ID."""
-        pool = await self._get_pool()
+        client = await self._get_client()
 
-        # Build INSERT query dynamically
-        columns = list(data.keys())
-        placeholders = [f"${i+1}" for i in range(len(columns))]
-        values = list(data.values())
+        # Convert UUID objects to strings for JSON serialization
+        insert_data = {}
+        for key, value in data.items():
+            if isinstance(value, UUID):
+                insert_data[key] = str(value)
+            else:
+                insert_data[key] = value
 
-        query = f"""
-            INSERT INTO {self.table_name} ({', '.join(columns)})
-            VALUES ({', '.join(placeholders)})
-            RETURNING id
-        """
+        # Remove 'id' field if present - let database generate it
+        insert_data.pop('id', None)
+
+        # Add timestamps
+        insert_data['created_at'] = datetime.utcnow().isoformat()
+        insert_data['updated_at'] = datetime.utcnow().isoformat()
 
         try:
-            async with pool.acquire() as conn:
-                result = await conn.fetchval(query, *values)
-                logger.info(f"Created record in {self.table_name}: {result}")
-                return result
+            result = await client.insert(self.table_name, insert_data)
+            if result and len(result) > 0:
+                record_id = result[0]['id']
+                logger.info(f"Created record in {self.table_name}: {record_id}")
+                return record_id
+            else:
+                raise Exception("No data returned from insert operation")
         except Exception as e:
             logger.error(f"Error creating record in {self.table_name}: {e}")
             raise
 
     async def get_by_id(self, record_id: UUID) -> Optional[Dict[str, Any]]:
         """Get a record by ID."""
-        pool = await self._get_pool()
-
-        query = f"SELECT * FROM {self.table_name} WHERE id = $1"
+        client = await self._get_client()
 
         try:
-            async with pool.acquire() as conn:
-                result = await conn.fetchrow(query, record_id)
-                return dict(result) if result else None
+            result = await client.select(self.table_name, filters={'id': str(record_id)})
+            return result[0] if result and len(result) > 0 else None
         except Exception as e:
-            logger.error(f"Error fetching record from {self.table_name}: {e}")
+            logger.error(f"Error getting record from {self.table_name}: {e}")
             raise
 
     async def get_all_by_user(self, user_id: UUID, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
-        """Get all records for a user with pagination."""
-        pool = await self._get_pool()
-
-        query = f"""
-            SELECT * FROM {self.table_name}
-            WHERE user_id = $1
-            ORDER BY created_at DESC
-            LIMIT $2 OFFSET $3
-        """
+        """Get all records for a user."""
+        client = await self._get_client()
 
         try:
-            async with pool.acquire() as conn:
-                results = await conn.fetch(query, user_id, limit, offset)
-                return [dict(row) for row in results]
+            result = await client.select(
+                self.table_name,
+                filters={'user_id': str(user_id)},
+                limit=limit,
+                offset=offset,
+                order_by='created_at',
+                order_desc=True
+            )
+            return result if result else []
         except Exception as e:
-            logger.error(f"Error fetching records from {self.table_name}: {e}")
+            logger.error(f"Error getting records from {self.table_name}: {e}")
             raise
 
     async def update(self, record_id: UUID, data: Dict[str, Any]) -> bool:
-        """Update a record by ID."""
-        pool = await self._get_pool()
+        """Update a record."""
+        client = await self._get_client()
 
-        # Build UPDATE query dynamically
-        set_clauses = [f"{key} = ${i+2}" for i, key in enumerate(data.keys())]
-        values = list(data.values())
+        # Convert UUID objects to strings for JSON serialization
+        update_data = {}
+        for key, value in data.items():
+            if isinstance(value, UUID):
+                update_data[key] = str(value)
+            else:
+                update_data[key] = value
 
-        query = f"""
-            UPDATE {self.table_name}
-            SET {', '.join(set_clauses)}, updated_at = NOW()
-            WHERE id = $1
-        """
+        # Add updated timestamp
+        update_data['updated_at'] = datetime.utcnow().isoformat()
 
         try:
-            async with pool.acquire() as conn:
-                result = await conn.execute(query, record_id, *values)
-                updated = result.split()[-1] == "1"  # Check if 1 row was updated
-                if updated:
-                    logger.info(f"Updated record in {self.table_name}: {record_id}")
-                else:
-                    logger.warning(f"No record found to update in {self.table_name}: {record_id}")
-                return updated
+            result = await client.update(self.table_name, {'id': str(record_id)}, update_data)
+            updated = result is not None and len(result) > 0
+            if updated:
+                logger.info(f"Updated record in {self.table_name}: {record_id}")
+            else:
+                logger.warning(f"No record found to update in {self.table_name}: {record_id}")
+            return updated
         except Exception as e:
             logger.error(f"Error updating record in {self.table_name}: {e}")
             raise
 
     async def delete(self, record_id: UUID) -> bool:
-        """Delete a record by ID."""
-        pool = await self._get_pool()
-
-        query = f"DELETE FROM {self.table_name} WHERE id = $1"
+        """Delete a record."""
+        client = await self._get_client()
 
         try:
-            async with pool.acquire() as conn:
-                result = await conn.execute(query, record_id)
-                deleted = result.split()[-1] == "1"  # Check if 1 row was deleted
-                if deleted:
-                    logger.info(f"Deleted record from {self.table_name}: {record_id}")
-                else:
-                    logger.warning(f"No record found to delete in {self.table_name}: {record_id}")
-                return deleted
+            result = await client.delete(self.table_name, {'id': str(record_id)})
+            if result:
+                logger.info(f"Deleted record from {self.table_name}: {record_id}")
+            else:
+                logger.warning(f"No record found to delete in {self.table_name}: {record_id}")
+            return result
         except Exception as e:
             logger.error(f"Error deleting record from {self.table_name}: {e}")
             raise
 
     async def count_by_user(self, user_id: UUID) -> int:
         """Count records for a user."""
-        pool = await self._get_pool()
-
-        query = f"SELECT COUNT(*) FROM {self.table_name} WHERE user_id = $1"
+        client = await self._get_client()
 
         try:
-            async with pool.acquire() as conn:
-                result = await conn.fetchval(query, user_id)
-                return result or 0
+            result = await client.select(self.table_name, filters={'user_id': str(user_id)})
+            return len(result) if result else 0
         except Exception as e:
             logger.error(f"Error counting records in {self.table_name}: {e}")
             raise
 
     async def close(self):
-        """Close database connections."""
-        if self._pool:
-            await self._pool.close()
-            self._pool = None
+        """Close database connections (no-op for Supabase)."""
+        pass

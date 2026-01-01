@@ -38,12 +38,11 @@ class UserAgentListResponse(BaseModel):
 @router.post("", response_model=UserAgent)
 async def create_user_agent(
     data: UserAgentCreate,
-    user_id: UUID = Query(..., description="User ID creating the user agent"),
     service: UserAgentService = Depends(get_user_agent_service),
 ):
     """Create a new user agent."""
     try:
-        agent_id = await service.create_user_agent(user_id, data)
+        agent_id = await service.create_user_agent(data.user_id, data)
         agent = await service.get_user_agent(agent_id)
         if not agent:
             raise HTTPException(status_code=500, detail="Failed to retrieve created user agent")

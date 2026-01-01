@@ -38,12 +38,11 @@ class TargetAgentListResponse(BaseModel):
 @router.post("", response_model=TargetAgent)
 async def create_target_agent(
     data: TargetAgentCreate,
-    user_id: UUID = Query(..., description="User ID creating the target agent"),
     service: TargetAgentService = Depends(get_target_agent_service),
 ):
     """Create a new target agent."""
     try:
-        agent_id = await service.create_target_agent(user_id, data)
+        agent_id = await service.create_target_agent(data.user_id, data)
         agent = await service.get_target_agent(agent_id)
         if not agent:
             raise HTTPException(status_code=500, detail="Failed to retrieve created target agent")

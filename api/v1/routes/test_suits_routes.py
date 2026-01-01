@@ -15,14 +15,14 @@ from services.scaled_testing_service import ScaledTestingService
 from services.web_scaled_testing_service import WebScaledTestingService
 from telemetrics.logger import logger
 
-router = APIRouter(prefix="/test-suites", tags=["Test Suites"])
+router = APIRouter(tags=["Scaled Tests"])
 
 # Store active test sessions
 active_tests: dict[str, ScaledTestingService] = {}
 active_web_tests: dict[str, WebScaledTestingService] = {}
 
 
-@router.post("", response_model=ScaledTestResponse)
+@router.post("/twilio-test", response_model=ScaledTestResponse)
 async def start_scaled_test(
     request: ScaledTestRequest,
     background_tasks: BackgroundTasks,
@@ -134,7 +134,7 @@ async def _run_test_async(
             del active_tests[test_id]
 
 
-@router.get("/{test_id}")
+@router.get("/twilio-test/{test_id}")
 async def get_test_status(test_id: str):
     """
     Get the status of a running or completed test.
@@ -155,19 +155,49 @@ async def get_test_status(test_id: str):
     }
 
 
-@router.get("")
+@router.get("/twilio-tests")
 async def list_tests():
-    """List all active tests."""
+    """List all active twilio tests."""
     return {
         "total": len(active_tests),
         "active_tests": list(active_tests.keys()),
     }
 
 
-@router.delete("/{test_id}")
+@router.get("/web-test/{test_id}")
+async def get_web_test_status(test_id: str):
+    """
+    Get the status of a running or completed web test.
+
+    Args:
+        test_id: Unique test identifier
+
+    Returns:
+        Test status information
+    """
+    if test_id not in active_web_tests:
+        raise HTTPException(status_code=404, detail=f"Web test '{test_id}' not found")
+
+    return {
+        "test_id": test_id,
+        "status": "running",
+        "message": "Web test is currently running",
+    }
+
+
+@router.get("/web-tests")
+async def list_web_tests():
+    """List all active web tests."""
+    return {
+        "total": len(active_web_tests),
+        "active_tests": list(active_web_tests.keys()),
+    }
+
+
+@router.delete("/twilio-test/{test_id}")
 async def delete_test(test_id: str):
     """
-    Delete a test (stops if running).
+    Delete a twilio test (stops if running).
 
     Args:
         test_id: Unique test identifier
@@ -182,7 +212,25 @@ async def delete_test(test_id: str):
     return {"success": True, "message": f"Test '{test_id}' deleted"}
 
 
-@router.post("/web", response_model=WebScaledTestResponse)
+@router.delete("/web-test/{test_id}")
+async def delete_web_test(test_id: str):
+    """
+    Delete a web test (stops if running).
+
+    Args:
+        test_id: Unique test identifier
+
+    Returns:
+        Success confirmation
+    """
+    if test_id not in active_web_tests:
+        raise HTTPException(status_code=404, detail=f"Web test '{test_id}' not found")
+
+    del active_web_tests[test_id]
+    return {"success": True, "message": f"Web test '{test_id}' deleted"}
+
+
+@router.post("/web-test", response_model=WebScaledTestResponse)
 async def start_web_scaled_test(
     request: WebScaledTestRequest,
     background_tasks: BackgroundTasks,

@@ -23,8 +23,17 @@ class TestSuiteService(DatabaseService[TestSuite]):
 
     async def create_test_suite(self, user_id: UUID, data: TestSuiteCreate) -> UUID:
         """Create a new test suite."""
-        suite_data = data.model_dump()
-        suite_data["user_id"] = user_id
+        # Only include basic fields that exist in the database
+        suite_data = {
+            "user_id": str(user_id),
+            "name": data.name,
+            "description": data.description
+        }
+        # Only add optional fields if they exist and are not None
+        if data.target_agent_id:
+            suite_data["target_agent_id"] = str(data.target_agent_id)
+        if data.user_agent_id:
+            suite_data["user_agent_id"] = str(data.user_agent_id)
         return await self.create(suite_data)
 
     async def get_test_suite(self, suite_id: UUID) -> Optional[TestSuite]:

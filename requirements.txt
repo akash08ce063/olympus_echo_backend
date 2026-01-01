@@ -7,3 +7,4 @@ numpy>=1.24.0
 python-multipart>=0.0.5
 aiofiles>=0.10.0
 contextlib2>=21.6.0
+supabase>=2.3.0
