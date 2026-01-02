@@ -75,8 +75,7 @@ make_api_call "2" "Create User Agent" "curl -X POST '${BASE_URL}/v1/user-agents'
 }'"
 
 # 3. Create Test Suite
-make_api_call "3" "Create Test Suite" "curl -X POST '${BASE_URL}/v1/test-suites' -H 'Content-Type: application/json' -d '{
-  \"user_id\": \"${USER_ID}\",
+make_api_call "3" "Create Test Suite" "curl -X POST '${BASE_URL}/v1/test-suites?user_id=${USER_ID}' -H 'Content-Type: application/json' -d '{
   \"name\": \"${TEST_SUITE_NAME}\",
   \"description\": \"${TEST_SUITE_DESC}\"
 }'"

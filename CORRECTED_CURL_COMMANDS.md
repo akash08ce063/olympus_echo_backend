@@ -139,15 +139,24 @@ curl -X POST "{{base_url}}/v1/user-agents" \
 
 ---
 
-## 3️⃣ **Create Test Suite** ⚠️
+## 3️⃣ **Create Test Suite** ✅
 
-**Note:** Test suite creation may fail if the `test_suites` table doesn't exist in your Supabase database. Ensure the table is created with the correct schema.
+**Flexible user_id**: Can be provided in request body OR as query parameter.
 
 ```bash
+# Option 1: user_id in request body
 curl -X POST "{{base_url}}/v1/test-suites" \
   -H "Content-Type: application/json" \
   -d '{
     "user_id": "{{user_id}}",
+    "name": "{{test_suite_name}}",
+    "description": "{{test_suite_desc}}"
+  }'
+
+# Option 2: user_id as query parameter (allows simpler body)
+curl -X POST "{{base_url}}/v1/test-suites?user_id={{user_id}}" \
+  -H "Content-Type: application/json" \
+  -d '{
     "name": "{{test_suite_name}}",
     "description": "{{test_suite_desc}}"
   }'
@@ -160,12 +169,14 @@ curl -X POST "{{base_url}}/v1/test-suites" \
   "user_id": "550e8400-e29b-41d4-a716-446655440001",
   "name": "Voice Agent Test Suite",
   "description": "Testing voice agent interactions and responses",
-  "target_agent_id": "550e8400-e29b-41d4-a716-446655440002",
-  "user_agent_id": "550e8400-e29b-41d4-a716-446655440003",
-  "created_at": "2026-01-01T16:48:52",
-  "updated_at": "2026-01-01T16:48:52"
+  "target_agent_id": null,
+  "user_agent_id": null,
+  "created_at": "2026-01-02T05:40:34.359742",
+  "updated_at": "2026-01-02T05:40:34.359749"
 }
 ```
+
+**Note:** `target_agent_id` and `user_agent_id` are optional - you can create test suites with just `name` and `description`!
 
 ---
 

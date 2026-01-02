@@ -9,11 +9,23 @@ import os
 import uvicorn
 from telemetrics.logger import logger
 
+from fastapi.middleware.cors import CORSMiddleware
+
 # Import and initialize static memory cache
 from static_memory_cache import StaticMemoryCache
 
 # Import the FastAPI app
 from api.app import app
+
+# ---------------- CORS (ALLOW ALL) ----------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],      # allow all origins
+    allow_credentials=True,
+    allow_methods=["*"],      # allow all methods
+    allow_headers=["*"],      # allow all headers
+)
+# -------------------------------------------------
 
 
 def main():

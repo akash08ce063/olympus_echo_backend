@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 class TestSuiteBase(BaseModel):
     """Base model for test suites."""
 
-    user_id: UUID = Field(..., description="User ID who owns this test suite")
+    user_id: Optional[UUID] = Field(None, description="User ID who owns this test suite (can also be provided as query parameter)")
     name: str = Field(..., min_length=1, max_length=255, description="Test suite name")
     description: Optional[str] = Field(None, description="Optional description")
     target_agent_id: Optional[UUID] = Field(None, description="ID of the target agent")
@@ -25,6 +25,15 @@ class TestSuiteBase(BaseModel):
 class TestSuiteCreate(TestSuiteBase):
     """Model for creating a new test suite."""
     pass
+
+
+class TestSuiteCreateRequest(BaseModel):
+    """Request model for creating test suites (user_id can be in query parameter or body)."""
+    user_id: Optional[UUID] = Field(None, description="User ID (can also be provided as query parameter)")
+    name: str = Field(..., min_length=1, max_length=255, description="Test suite name")
+    description: Optional[str] = Field(None, description="Optional description")
+    target_agent_id: Optional[UUID] = Field(None, description="ID of the target agent")
+    user_agent_id: Optional[UUID] = Field(None, description="ID of the user agent")
 
 
 class TestSuiteUpdate(BaseModel):

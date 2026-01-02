@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel
 
 from models.test_suite_models import (
-    TestSuiteCreate, TestSuiteUpdate, TestSuite, TestSuiteWithRelations
+    TestSuiteCreate, TestSuiteCreateRequest, TestSuiteUpdate, TestSuite, TestSuiteWithRelations
 )
 from services.test_suite_service import TestSuiteService
 from telemetrics.logger import logger
@@ -39,16 +39,38 @@ class TestSuiteListResponse(BaseModel):
 
 @router.post("", response_model=TestSuite)
 async def create_test_suite(
-    data: TestSuiteCreate,
+    data: TestSuiteCreateRequest,
+    user_id: Optional[UUID] = Query(None, description="User ID (can also be in request body)"),
     service: TestSuiteService = Depends(get_test_suite_service),
 ):
-    """Create a new test suite."""
+    """Create a new test suite.
+
+    User ID can be provided either in the request body or as a query parameter.
+    Allows creating test suites with just name and description (target_agent_id and user_agent_id are optional).
+    """
     try:
-        suite_id = await service.create_test_suite(data.user_id, data)
+        # Use user_id from query param if provided, otherwise from body
+        actual_user_id = user_id if user_id is not None else data.user_id
+
+        if actual_user_id is None:
+            raise HTTPException(status_code=400, detail="user_id is required (in body or as query parameter)")
+
+        # Create the full TestSuiteCreate object
+        suite_data = TestSuiteCreate(
+            user_id=actual_user_id,
+            name=data.name,
+            description=data.description,
+            target_agent_id=data.target_agent_id,
+            user_agent_id=data.user_agent_id
+        )
+
+        suite_id = await service.create_test_suite(actual_user_id, suite_data)
         suite = await service.get_test_suite(suite_id)
         if not suite:
             raise HTTPException(status_code=500, detail="Failed to retrieve created test suite")
         return suite
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error creating test suite: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create test suite: {str(e)}")
