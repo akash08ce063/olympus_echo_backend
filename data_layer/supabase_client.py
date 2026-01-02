@@ -83,12 +83,15 @@ class SupabaseClient:
     async def delete(self, table_name: str, filters: Dict[str, Any]) -> bool:
         """Delete data from a table."""
         try:
-            query = self.async_client.table(table_name)
+            # Start with delete query
+            query = self.async_client.table(table_name).delete()
 
+            # Apply filters
             for key, value in filters.items():
                 query = query.eq(key, value)
 
-            result = await query.delete().execute()
+            # Execute the delete
+            result = await query.execute()
             return True
         except Exception as e:
             logger.error(f"Error deleting from {table_name}: {str(e)}")

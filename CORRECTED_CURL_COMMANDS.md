@@ -188,19 +188,18 @@ curl -X POST "{{base_url}}/v1/test-cases" \
   -d '{
     "test_suite_id": "550e8400-e29b-41d4-a716-446655440004",
     "name": "{{test_case_name}}",
-    "steps": [
+    "goals": [
       {
         "action": "speak",
         "text": "Hello, can you help me with my account?"
       }
     ],
-    "conditions": [
+    "evaluation_criteria": [
       {
         "type": "response_contains",
         "expected": "Hello"
       }
     ],
-    "expected_outcome": "Agent should greet customer and offer assistance",
     "timeout_seconds": 30,
     "order_index": 0,
     "is_active": true
@@ -365,19 +364,18 @@ TEST_CASE_RESPONSE=$(curl -s -X POST "{{base_url}}/v1/test-cases" \
   -d '{
     "test_suite_id": "'${TEST_SUITE_ID}'",
     "name": "'${TEST_CASE_NAME}'",
-    "steps": [
+    "goals": [
       {
         "action": "speak",
         "text": "Hello, can you help me with my account?"
       }
     ],
-    "conditions": [
+    "evaluation_criteria": [
       {
         "type": "response_contains",
         "expected": "Hello"
       }
     ],
-    "expected_outcome": "Agent should greet customer and offer assistance",
     "timeout_seconds": 30,
     "order_index": 0,
     "is_active": true

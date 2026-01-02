@@ -120,9 +120,8 @@ class TestCaseBase(BaseModel):
     """Base model for test cases."""
 
     name: str = Field(..., min_length=1, max_length=255, description="Test case name")
-    steps: List[Dict[str, Any]] = Field(..., description="Array of test steps/prompts")
-    conditions: List[Dict[str, Any]] = Field(..., description="Array of validation conditions")
-    expected_outcome: str = Field(..., description="Expected outcome description")
+    goals: List[Dict[str, Any]] = Field(..., description="Array of test goals/prompts")
+    evaluation_criteria: List[Dict[str, Any]] = Field(..., description="Array of evaluation criteria")
     timeout_seconds: int = Field(300, ge=1, description="Timeout in seconds")
     order_index: int = Field(0, ge=0, description="Order index for sorting")
     is_active: bool = Field(True, description="Whether this test case is active")
@@ -140,9 +139,8 @@ class TestCaseUpdate(BaseModel):
     """Model for updating a test case."""
 
     name: Optional[str] = Field(None, min_length=1, max_length=255, description="Test case name")
-    steps: Optional[List[Dict[str, Any]]] = Field(None, description="Array of test steps/prompts")
-    conditions: Optional[List[Dict[str, Any]]] = Field(None, description="Array of validation conditions")
-    expected_outcome: Optional[str] = Field(None, description="Expected outcome description")
+    goals: Optional[List[Dict[str, Any]]] = Field(None, description="Array of test goals/prompts")
+    evaluation_criteria: Optional[List[Dict[str, Any]]] = Field(None, description="Array of evaluation criteria")
     timeout_seconds: Optional[int] = Field(None, ge=1, description="Timeout in seconds")
     order_index: Optional[int] = Field(None, ge=0, description="Order index for sorting")
     is_active: Optional[bool] = Field(None, description="Whether this test case is active")

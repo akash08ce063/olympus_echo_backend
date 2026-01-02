@@ -20,6 +20,145 @@
       "response": []
     },
     {
+      "name": "Test Execution",
+      "item": [
+        {
+          "name": "Run Test Suite",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"concurrent_calls\": 1\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/test-execution/run-suite/{{test_suite_id}}?user_id={{user_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "test-execution",
+                "run-suite",
+                "{{test_suite_id}}"
+              ],
+              "query": [
+                {
+                  "key": "user_id",
+                  "value": "{{user_id}}"
+                }
+              ]
+            },
+            "description": "Start execution of all active test cases in a test suite"
+          },
+          "response": []
+        },
+        {
+          "name": "Run Single Test Case",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"concurrent_calls\": 1\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/test-execution/run-case/{{test_case_id}}?user_id={{user_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "test-execution",
+                "run-case",
+                "{{test_case_id}}"
+              ],
+              "query": [
+                {
+                  "key": "user_id",
+                  "value": "{{user_id}}"
+                }
+              ]
+            },
+            "description": "Start execution of a single test case"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Test Run Status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/test-execution/status/{{test_run_id}}?user_id={{user_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "test-execution",
+                "status",
+                "{{test_run_id}}"
+              ],
+              "query": [
+                {
+                  "key": "user_id",
+                  "value": "{{user_id}}"
+                }
+              ]
+            },
+            "description": "Get the status and results of a test run"
+          },
+          "response": []
+        },
+        {
+          "name": "List Test Runs",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/test-execution/runs?user_id={{user_id}}&limit=10&offset=0",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "test-execution",
+                "runs"
+              ],
+              "query": [
+                {
+                  "key": "user_id",
+                  "value": "{{user_id}}"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                },
+                {
+                  "key": "offset",
+                  "value": "0"
+                }
+              ]
+            },
+            "description": "List all test runs for a user"
+          },
+          "response": []
+        }
+      ],
+      "description": "Endpoints for executing test cases and test suites"
+    },
+    {
       "name": "Target Agents",
       "item": [
         {
@@ -340,7 +479,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"test_suite_id\": \"{{test_suite_id}}\",\n  \"name\": \"{{test_case_name}}\",\n  \"steps\": [\n    {\n      \"action\": \"speak\",\n      \"text\": \"Hello, can you help me with my account?\"\n    }\n  ],\n  \"conditions\": [\n    {\n      \"type\": \"response_contains\",\n      \"expected\": \"Hello\"\n    }\n  ],\n  \"expected_outcome\": \"Agent should greet customer and offer assistance\",\n  \"timeout_seconds\": 30,\n  \"order_index\": 0,\n  \"is_active\": true,\n  \"attempts\": 3,\n  \"default_concurrent_calls\": 1\n}"
+              "raw": "{\n  \"test_suite_id\": \"{{test_suite_id}}\",\n  \"name\": \"{{test_case_name}}\",\n  \"goals\": [\n    {\n      \"action\": \"speak\",\n      \"text\": \"Hello, can you help me with my account?\"\n    }\n  ],\n  \"evaluation_criteria\": [\n    {\n      \"type\": \"response_contains\",\n      \"expected\": \"Hello\"\n    }\n  ],\n  \"timeout_seconds\": 30,\n  \"order_index\": 0,\n  \"is_active\": true,\n  \"attempts\": 3,\n  \"default_concurrent_calls\": 1\n}"
             },
             "url": {
               "raw": "{{base_url}}/v1/test-cases",

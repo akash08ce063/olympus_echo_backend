@@ -84,19 +84,18 @@ make_api_call "3" "Create Test Suite" "curl -X POST '${BASE_URL}/v1/test-suites?
 make_api_call "4" "Create Test Case" "curl -X POST '${BASE_URL}/v1/test-cases' -H 'Content-Type: application/json' -d '{
   \"test_suite_id\": \"20046318-8654-4365-a047-33d013a47fa6\",
   \"name\": \"${TEST_CASE_NAME}\",
-  \"steps\": [
+  \"goals\": [
     {
       \"action\": \"speak\",
       \"text\": \"Hello, can you help me with my account?\"
     }
   ],
-  \"conditions\": [
+  \"evaluation_criteria\": [
     {
       \"type\": \"response_contains\",
       \"expected\": \"Hello\"
     }
   ],
-  \"expected_outcome\": \"Agent should greet customer and offer assistance\",
   \"timeout_seconds\": 30,
   \"order_index\": 0,
   \"is_active\": true

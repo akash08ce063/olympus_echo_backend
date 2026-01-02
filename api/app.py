@@ -7,7 +7,8 @@ from fastapi import APIRouter, FastAPI
 from api.v1.routes import (
     test_suits_routes,
     test_suites_routes, target_agents_routes,
-    user_agents_routes, test_cases_routes, test_history_routes
+    user_agents_routes, test_cases_routes, test_history_routes,
+    test_execution_routes
 )
 from telemetrics.logger import logger
 
@@ -37,6 +38,7 @@ v1_router.include_router(target_agents_routes.router)  # Target agents CRUD
 v1_router.include_router(user_agents_routes.router)  # User agents CRUD
 v1_router.include_router(test_cases_routes.router)  # Test cases CRUD
 v1_router.include_router(test_history_routes.router)  # Test history read-only
+v1_router.include_router(test_execution_routes.router)  # Test execution
 
 # Include v1 router in main app
 app.include_router(v1_router)
