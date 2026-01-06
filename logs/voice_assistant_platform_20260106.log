@@ -2472,3 +2472,21 @@ evaluation_criteria.1
 2026-01-06 17:55:21 [INFO] logging:emit:1160 [PID:79399] [TID:8470126720] Starting Voice Testing Platform on 0.0.0.0:8080
 2026-01-06 17:55:21 [INFO] logging:emit:1160 [PID:79399] [TID:8470126720] Voice Testing Platform startup
 2026-01-06 17:55:21 [INFO] logging:emit:1160 [PID:79399] [TID:8470126720] Voice Testing Platform shutdown
+2026-01-06 18:00:30 [INFO] logging:emit:1160 [PID:82793] [TID:8470126720] Initializing static memory cache...
+2026-01-06 18:00:30 [INFO] logging:emit:1160 [PID:82793] [TID:8470126720] Static memory cache initialized successfully
+2026-01-06 18:00:30 [INFO] logging:emit:1160 [PID:82793] [TID:8470126720] Starting Voice Testing Platform on 0.0.0.0:8080
+2026-01-06 18:00:30 [INFO] logging:emit:1160 [PID:82793] [TID:8470126720] Voice Testing Platform startup
+2026-01-06 18:01:03 [INFO] logging:emit:1160 [PID:82793] [TID:8470126720] Supabase client created successfully
+2026-01-06 18:04:11 [INFO] logging:emit:1160 [PID:83283] [TID:8470126720] Initializing static memory cache...
+2026-01-06 18:04:11 [INFO] logging:emit:1160 [PID:83283] [TID:8470126720] Static memory cache initialized successfully
+2026-01-06 18:04:11 [INFO] logging:emit:1160 [PID:83283] [TID:8470126720] Starting Voice Testing Platform on 0.0.0.0:8080
+2026-01-06 18:04:11 [INFO] logging:emit:1160 [PID:83283] [TID:8470126720] Voice Testing Platform startup
+2026-01-06 18:04:16 [INFO] logging:emit:1160 [PID:83283] [TID:8470126720] Supabase client created successfully
+2026-01-06 18:04:17 [ERROR] logging:emit:1160 [PID:83283] [TID:8470126720] Error getting test case status for suite 82c63bc6-b94e-45a7-89d4-bb3db691e053: 'SupabaseClient' object has no attribute 'table'
+2026-01-06 18:04:20 [ERROR] logging:emit:1160 [PID:83283] [TID:8470126720] Error getting test case status for suite 82c63bc6-b94e-45a7-89d4-bb3db691e053: 'SupabaseClient' object has no attribute 'table'
+2026-01-06 18:04:38 [INFO] logging:emit:1160 [PID:83283] [TID:8470126720] Voice Testing Platform shutdown
+2026-01-06 18:04:48 [INFO] logging:emit:1160 [PID:83400] [TID:8470126720] Initializing static memory cache...
+2026-01-06 18:04:48 [INFO] logging:emit:1160 [PID:83400] [TID:8470126720] Static memory cache initialized successfully
+2026-01-06 18:04:48 [INFO] logging:emit:1160 [PID:83400] [TID:8470126720] Starting Voice Testing Platform on 0.0.0.0:8080
+2026-01-06 18:04:48 [INFO] logging:emit:1160 [PID:83400] [TID:8470126720] Voice Testing Platform startup
+2026-01-06 18:04:52 [INFO] logging:emit:1160 [PID:83400] [TID:8470126720] Supabase client created successfully

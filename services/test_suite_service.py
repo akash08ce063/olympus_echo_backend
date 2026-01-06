@@ -113,6 +113,9 @@ class TestSuiteService(DatabaseService[TestSuite]):
             # Get test cases
             test_cases = await self._get_test_cases_for_suite(suite_id)
 
+            # Get test case status
+            test_case_status = await self._get_test_case_status(suite_id)
+
             return TestSuiteWithRelations(
                 id=suite_data['id'],
                 user_id=suite_data['user_id'],
@@ -124,11 +127,52 @@ class TestSuiteService(DatabaseService[TestSuite]):
                 updated_at=suite_data['updated_at'],
                 target_agent=target_agent,
                 user_agent=user_agent,
-                test_cases=test_cases
+                test_cases=test_cases,
+                test_case_status=test_case_status
             )
+
         except Exception as e:
             logger.error(f"Error getting test suite with relations: {e}")
             raise
+
+    async def _get_test_case_status(self, suite_id: UUID) -> Dict[str, str]:
+        """Get the latest status for each test case in the suite."""
+        try:
+            from supabase.client import acreate_client
+            from static_memory_cache import StaticMemoryCache
+
+            # Get database config directly
+            db_config = StaticMemoryCache.get_database_config()
+            supabase_url = db_config.get("supabase_url")
+            supabase_key = db_config.get("supabase_key")
+
+            if not supabase_url or not supabase_key:
+                logger.warning("Supabase URL and Key not configured, returning empty status dict")
+                return {}
+
+            # Create raw Supabase client directly
+            async_client = await acreate_client(supabase_url, supabase_key)
+
+            # Query test_case_results to get latest status for each test case in this suite
+            result = await async_client.table('test_case_results').select(
+                'test_case_id, status, test_run_id, created_at'
+            ).eq('test_suite_id', str(suite_id)).order('created_at', desc=True).execute()
+
+            status_dict = {}
+            seen_cases = set()
+
+            # Process results to get the latest status for each test case
+            for record in result.data if result.data else []:
+                test_case_id = record['test_case_id']
+                if test_case_id not in seen_cases:
+                    status_dict[test_case_id] = record['status']
+                    seen_cases.add(test_case_id)
+
+            return status_dict
+
+        except Exception as e:
+            logger.error(f"Error getting test case status for suite {suite_id}: {e}")
+            return {}
 
     async def _get_test_cases_for_suite(self, suite_id: UUID) -> List[TestCase]:
         """Get test cases for a suite."""

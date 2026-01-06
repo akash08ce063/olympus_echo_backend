@@ -224,6 +224,7 @@ class TestSuiteWithRelations(TestSuite):
     target_agent: Optional[TargetAgent] = Field(None, description="Target agent details")
     user_agent: Optional[UserAgent] = Field(None, description="User agent details")
     test_cases: List[TestCase] = Field(default_factory=list, description="Test cases in this suite")
+    test_case_status: Dict[str, str] = Field(default_factory=dict, description="Status of each test case by ID")
 
 
 class TestRunWithResults(TestRunHistory):
