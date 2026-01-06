@@ -231,3 +231,8 @@
 2026-01-02 16:17:23 [INFO] logging:emit:1160 [PID:82849] [TID:8470126720] Updated record in test_suites: db383ba3-190e-43ec-af41-bdb8d71e2d3f
 2026-01-02 16:24:02 [INFO] logging:emit:1160 [PID:82849] [TID:8470126720] Deleted record from test_suites: db383ba3-190e-43ec-af41-bdb8d71e2d3f
 2026-01-02 16:29:49 [INFO] logging:emit:1160 [PID:82849] [TID:8470126720] Voice Testing Platform shutdown
+2026-01-02 16:39:07 [INFO] logging:emit:1160 [PID:2173] [TID:8470126720] Initializing static memory cache...
+2026-01-02 16:39:07 [INFO] logging:emit:1160 [PID:2173] [TID:8470126720] Static memory cache initialized successfully
+2026-01-02 16:39:07 [INFO] logging:emit:1160 [PID:2173] [TID:8470126720] Starting Voice Testing Platform on 0.0.0.0:8080
+2026-01-02 16:39:07 [INFO] logging:emit:1160 [PID:2173] [TID:8470126720] Voice Testing Platform startup
+2026-01-02 16:40:27 [INFO] logging:emit:1160 [PID:2173] [TID:8470126720] Supabase client created successfully

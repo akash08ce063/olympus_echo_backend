@@ -32,6 +32,14 @@ class DatabaseService(ABC, Generic[T]):
 
     async def create(self, data: Dict[str, Any]) -> UUID:
         """Create a new record and return its ID."""
+        return await self._create_record(data, allow_id_override=False)
+
+    async def create_with_id(self, data: Dict[str, Any]) -> str:
+        """Create a new record with a specific ID and return the ID."""
+        return await self._create_record(data, allow_id_override=True)
+
+    async def _create_record(self, data: Dict[str, Any], allow_id_override: bool = False) -> str:
+        """Internal method to create a record."""
         client = await self._get_client()
 
         # Convert UUID objects to strings for JSON serialization
@@ -42,8 +50,11 @@ class DatabaseService(ABC, Generic[T]):
             else:
                 insert_data[key] = value
 
-        # Remove 'id' field if present - let database generate it
-        insert_data.pop('id', None)
+        # Handle 'id' field based on allow_id_override
+        if not allow_id_override:
+            # Remove 'id' field if present - let database generate it
+            insert_data.pop('id', None)
+        # If allow_id_override is True, keep the 'id' field if present
 
         # Add timestamps
         insert_data['created_at'] = datetime.utcnow().isoformat()

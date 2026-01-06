@@ -161,6 +161,69 @@ class TestSuiteService(DatabaseService[TestSuite]):
         update_data = data.model_dump(exclude_unset=True)
         return await self.update(suite_id, update_data)
 
+    async def nullify_user_agent_references(self, user_agent_id: UUID) -> int:
+        """Set user_agent_id to null for all test suites associated with a user agent ID."""
+        try:
+            from supabase.client import acreate_client
+            from static_memory_cache import StaticMemoryCache
+
+            # Get database config directly
+            db_config = StaticMemoryCache.get_database_config()
+            supabase_url = db_config.get("supabase_url")
+            supabase_key = db_config.get("supabase_key")
+
+            if not supabase_url or not supabase_key:
+                raise ValueError("Supabase URL and Key must be configured")
+
+            # Create raw Supabase client directly
+            async_client = await acreate_client(supabase_url, supabase_key)
+
+            # Use raw Supabase client to do bulk update
+            result = await async_client.table(self.table_name).update({
+                'user_agent_id': None,
+                'updated_at': 'now()'
+            }).eq('user_agent_id', str(user_agent_id)).execute()
+
+            updated_count = len(result.data) if result.data else 0
+            logger.info(f"Set user_agent_id to null for {updated_count} test suites associated with user agent {user_agent_id}")
+            return updated_count
+
+        except Exception as e:
+            logger.error(f"Error nullifying user agent references in test suites: {e}")
+            return 0
+
+    async def nullify_target_agent_references(self, target_agent_id: UUID) -> int:
+        """Set target_agent_id to null for all test suites associated with a target agent ID."""
+        try:
+            from supabase.client import acreate_client
+            from static_memory_cache import StaticMemoryCache
+
+            # Get database config directly
+            db_config = StaticMemoryCache.get_database_config()
+            supabase_url = db_config.get("supabase_url")
+            supabase_key = db_config.get("supabase_key")
+
+            if not supabase_url or not supabase_key:
+                raise ValueError("Supabase URL and Key must be configured")
+
+            # Create raw Supabase client directly
+            async_client = await acreate_client(supabase_url, supabase_key)
+
+            # Use raw Supabase client to do bulk update
+            result = await async_client.table(self.table_name).update({
+                'target_agent_id': None,
+                'updated_at': 'now()'
+            }).eq('target_agent_id', str(target_agent_id)).execute()
+
+            updated_count = len(result.data) if result.data else 0
+            logger.info(f"Set target_agent_id to null for {updated_count} test suites associated with target agent {target_agent_id}")
+            return updated_count
+
+        except Exception as e:
+            logger.error(f"Error nullifying target agent references in test suites: {e}")
+            return 0
+
+
     async def delete_test_suite(self, suite_id: UUID) -> bool:
         """Delete a test suite."""
         return await self.delete(suite_id)

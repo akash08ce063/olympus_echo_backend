@@ -62,36 +62,37 @@ class PranthoraApiClient:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.client.aclose()
 
-    async def create_agent(self, agent_data: Dict[str, Any]) -> Dict[str, Any]:
+    async def create_agent(self, agent_data: Dict[str, Any], request_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Create a new agent in Pranthora backend.
 
         Args:
             agent_data: Agent configuration data
+            request_id: Optional request ID to send in headers
 
         Returns:
             Created agent response
         """
         try:
-            # Prepare the request data - exclude temperature from agent data since it's not part of AgentCreateRequest
-            agent_request_data = {k: v for k, v in agent_data.items() if k != "temperature"}
+            # Create SimpleAgentCreateRequest for simple agent creation
+            request_data = {
+                "name": agent_data.get("name", ""),
+                "system_prompt": agent_data.get("system_prompt"),
+                "temperature": agent_data.get("temperature", 0.7)
+            }
 
-            request_data = CompleteAgentRequest(
-                agent=AgentCreateRequest(**agent_request_data),
-                agent_model_config=ModelConfigRequest(
-                    model_provider_id="openai",  # Default provider
-                    system_prompt=agent_data.get("system_prompt", ""),
-                    temperature=agent_data.get("temperature", 0.7),
-                    max_tokens=4000  # Default max tokens
-                ) if agent_data.get("system_prompt") else None
-            )
-
-            url = f"{self.base_url}/api/v1/agents/"
+            url = f"{self.base_url}/api/v1/agents/simple"
             logger.info(f"Creating agent in Pranthora: {agent_data.get('name')}")
+
+            # Prepare headers
+            headers = {}
+            if request_id:
+                headers["x-pranthora-callid"] = request_id
 
             response = await self.client.post(
                 url,
-                json=request_data.model_dump(exclude_unset=True)
+                json=request_data,
+                headers=headers
             )
 
             if response.status_code == 201:
@@ -203,12 +204,11 @@ class PranthoraApiClient:
             Success status
         """
         try:
-            url = f"{self.base_url}/api/v1/agents/{agent_id}"
-            logger.info(f"Deleting agent from Pranthora: {agent_id}")
+            url = f"{self.base_url}/api/v1/agents/{agent_id}?force_delete=true"
 
             response = await self.client.delete(url)
 
-            if response.status_code == 204:
+            if response.status_code in [200, 204]:
                 logger.info(f"Successfully deleted agent from Pranthora: {agent_id}")
                 return True
             else:

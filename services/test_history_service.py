@@ -147,6 +147,105 @@ class TestCaseResultService(DatabaseService[TestCaseResult]):
             alerts=alerts
         )
 
+    async def create_test_case_result_with_recording(
+        self,
+        test_run_id: UUID,
+        test_case_id: UUID,
+        test_suite_id: UUID,
+        status: str,
+        pcm_frames: bytes,
+        sample_rate: int = 16000,
+        num_channels: int = 2,  # Default to stereo for combined agent audio
+        conversation_logs: Optional[List[Dict[str, Any]]] = None,
+        evaluation_result: Optional[Dict[str, Any]] = None,
+        error_message: Optional[str] = None,
+        concurrent_calls: int = 1,
+        wav_file_ids: Optional[List[str]] = None
+    ) -> UUID:
+        """
+        Create a test case result and upload recording file(s) to Supabase storage.
+
+        Args:
+            test_run_id: ID of the test run
+            test_case_id: ID of the test case
+            test_suite_id: ID of the test suite
+            status: Result status (pass, fail, alert)
+            pcm_frames: Raw PCM audio data
+            sample_rate: Audio sample rate (default: 16000)
+            num_channels: Number of audio channels (1=mono, 2=stereo, default: 2 for combined agent audio)
+            conversation_logs: Optional conversation logs
+            evaluation_result: Optional evaluation result from user agent
+            error_message: Optional error message
+            concurrent_calls: Number of concurrent calls (default: 1)
+            wav_file_ids: List of pre-uploaded WAV file IDs for concurrent calls
+
+        Returns:
+            UUID of the created test case result
+        """
+        try:
+            result_data = {
+                "test_run_id": str(test_run_id),
+                "test_case_id": str(test_case_id),
+                "test_suite_id": str(test_suite_id),
+                "status": status,
+                "conversation_logs": conversation_logs,
+                "evaluation_result": evaluation_result,
+                "error_message": error_message
+            }
+
+            # Try to add concurrent calls support (will work if columns exist)
+            concurrent_supported = False
+            try:
+                result_data["concurrent_calls"] = concurrent_calls
+                concurrent_supported = True
+            except Exception:
+                logger.warning("Concurrent calls not supported in database, using legacy mode")
+
+            # Handle recording file IDs based on concurrent calls
+            if concurrent_supported and wav_file_ids and len(wav_file_ids) > 0:
+                # For concurrent calls, use pre-uploaded file IDs
+                try:
+                    result_data["wav_file_ids"] = wav_file_ids
+                    if len(wav_file_ids) == 1:
+                        # For backward compatibility, also set single recording_file_id
+                        result_data["recording_file_id"] = wav_file_ids[0]
+                    logger.info(f"Using pre-uploaded recording files for concurrent calls: {wav_file_ids}")
+                except Exception as e:
+                    logger.warning(f"Could not store wav_file_ids, falling back to legacy: {e}")
+                    concurrent_supported = False
+
+            if not concurrent_supported or not (wav_file_ids and len(wav_file_ids) > 0):
+                # For single calls, upload combined recording (legacy behavior)
+                wav_buffer = io.BytesIO()
+                with wave.open(wav_buffer, 'wb') as wav_file:
+                    wav_file.setnchannels(num_channels)  # Stereo for combined agent audio
+                    wav_file.setsampwidth(2)  # 16-bit
+                    wav_file.setframerate(sample_rate)
+                    wav_file.writeframes(pcm_frames)
+
+                wav_data = wav_buffer.getvalue()
+
+                # Upload recording file to Supabase storage
+                recording_file_id = await self.recording_service.upload_recording_file(
+                    file_content=wav_data,
+                    file_name=f"test_case_{test_case_id}.wav",
+                    content_type="audio/wav"
+                )
+
+                if recording_file_id:
+                    result_data["recording_file_id"] = str(recording_file_id)
+                    logger.info(f"Uploaded combined recording: {recording_file_id}")
+                else:
+                    logger.warning(f"Failed to upload recording for test case {test_case_id}")
+
+            result_id = await self.create(result_data)
+            logger.info(f"Created test case result: {result_id} with {concurrent_calls} concurrent call(s)")
+            return result_id
+
+        except Exception as e:
+            logger.error(f"Error creating test case result with recording: {e}")
+            raise
+
 
 class TestAlertService(DatabaseService[TestAlert]):
     """Service for test alert read operations."""
@@ -178,79 +277,6 @@ class TestAlertService(DatabaseService[TestAlert]):
             return [TestAlert(**result) for result in results]
         except Exception as e:
             logger.error(f"Error fetching alerts for result {result_id}: {e}")
-            raise
-
-    async def create_test_case_result_with_recording(
-        self,
-        test_run_id: UUID,
-        test_case_id: UUID,
-        test_suite_id: UUID,
-        status: str,
-        pcm_frames: bytes,
-        sample_rate: int = 16000,
-        conversation_logs: Optional[List[Dict[str, Any]]] = None,
-        evaluation_result: Optional[Dict[str, Any]] = None,
-        error_message: Optional[str] = None
-    ) -> UUID:
-        """
-        Create a test case result and upload recording file to Supabase storage.
-
-        Args:
-            test_run_id: ID of the test run
-            test_case_id: ID of the test case
-            test_suite_id: ID of the test suite
-            status: Result status (pass, fail, alert)
-            pcm_frames: Raw PCM audio data
-            sample_rate: Audio sample rate (default: 16000)
-            conversation_logs: Optional conversation logs
-            evaluation_result: Optional evaluation result from user agent
-            error_message: Optional error message
-
-        Returns:
-            UUID of the created test case result
-        """
-        try:
-            # Convert PCM frames to WAV format
-            wav_buffer = io.BytesIO()
-            with wave.open(wav_buffer, 'wb') as wav_file:
-                wav_file.setnchannels(1)  # Mono
-                wav_file.setsampwidth(2)  # 16-bit
-                wav_file.setframerate(sample_rate)
-                wav_file.writeframes(pcm_frames)
-
-            wav_data = wav_buffer.getvalue()
-
-            # Upload recording file to Supabase storage
-            recording_file_id = await self.recording_service.upload_recording_file(
-                file_content=wav_data,
-                file_name=f"test_case_{test_case_id}.wav",
-                content_type="audio/wav"
-            )
-
-            if not recording_file_id:
-                logger.warning(f"Failed to upload recording for test case {test_case_id}")
-                # Continue without recording file
-
-            # Create test case result record
-            result_data = {
-                "test_run_id": str(test_run_id),
-                "test_case_id": str(test_case_id),
-                "test_suite_id": str(test_suite_id),
-                "status": status,
-                "conversation_logs": conversation_logs,
-                "evaluation_result": evaluation_result,
-                "error_message": error_message
-            }
-
-            if recording_file_id:
-                result_data["recording_file_id"] = str(recording_file_id)
-
-            result_id = await self.create(result_data)
-            logger.info(f"Created test case result: {result_id} with recording: {recording_file_id}")
-            return result_id
-
-        except Exception as e:
-            logger.error(f"Error creating test case result with recording: {e}")
             raise
 
     async def get_recording_file(self, result_id: UUID) -> Optional[bytes]:

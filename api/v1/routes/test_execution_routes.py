@@ -7,12 +7,13 @@ This module provides REST API endpoints for running test cases and test suites.
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, Depends, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Query, Depends, BackgroundTasks, Request
 from pydantic import BaseModel
 
 from services.test_execution_service import TestExecutionService
 from services.test_suite_service import TestSuiteService
 from services.test_case_service import TestCaseService
+from services.pranthora_api_client import PranthoraApiClient
 from telemetrics.logger import logger
 
 router = APIRouter(prefix="/test-execution", tags=["Test Execution"])
@@ -52,6 +53,7 @@ async def run_test_suite(
     request: RunTestSuiteRequest,
     background_tasks: BackgroundTasks,
     user_id: UUID = Query(..., description="User ID who is running the test"),
+    request_obj: Request = None,  # Add request object to capture headers
     service: TestExecutionService = Depends(get_test_execution_service),
 ):
     """
@@ -61,6 +63,7 @@ async def run_test_suite(
         suite_id: ID of the test suite to run
         request: Request parameters
         user_id: User ID (should come from authentication middleware)
+        request_obj: FastAPI request object to capture headers
         service: Test execution service
 
     Returns:
@@ -93,11 +96,20 @@ async def run_test_suite(
             await test_suite_service.close()
             await test_case_service.close()
 
+        # Get the request ID from header
+        request_id = request_obj.headers.get("x-pranthora-callid")
+        if not request_id:
+            raise HTTPException(
+                status_code=400,
+                detail="x-pranthora-callid header is required"
+            )
+
         # Start the test execution
         test_run_id = await service.run_test_suite(
-            suite_id=suite_id,
+            test_suite_id=suite_id,
             user_id=user_id,
-            concurrent_calls=request.concurrent_calls
+            concurrent_calls=request.concurrent_calls,
+            request_id=request_id
         )
 
         return TestExecutionResponse(
@@ -126,6 +138,7 @@ async def run_test_case(
     request: RunTestCaseRequest,
     background_tasks: BackgroundTasks,
     user_id: UUID = Query(..., description="User ID who is running the test"),
+    request_obj: Request = None,  # Add request object to capture headers
     service: TestExecutionService = Depends(get_test_execution_service),
 ):
     """
@@ -135,6 +148,7 @@ async def run_test_case(
         case_id: ID of the test case to run
         request: Request parameters
         user_id: User ID (should come from authentication middleware)
+        request_obj: FastAPI request object to capture headers
         service: Test execution service
 
     Returns:
@@ -170,11 +184,20 @@ async def run_test_case(
         finally:
             await test_case_service.close()
 
+        # Get the request ID from header
+        request_id = request_obj.headers.get("x-pranthora-callid")
+        if not request_id:
+            raise HTTPException(
+                status_code=400,
+                detail="x-pranthora-callid header is required"
+            )
+
         # Start the test execution
         test_run_id = await service.run_single_test_case(
             test_case_id=case_id,
             user_id=user_id,
-            concurrent_calls=request.concurrent_calls
+            concurrent_calls=request.concurrent_calls,
+            request_id=request_id
         )
 
         return TestExecutionResponse(
@@ -324,3 +347,85 @@ async def list_test_runs(
     except Exception as e:
         logger.error(f"Error listing test runs: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to list test runs: {str(e)}")
+
+
+@router.get("/call-logs/{request_id}")
+async def get_call_logs_by_request_id(
+    request_id: str,
+    user_id: UUID = Query(..., description="User ID for authorization"),
+    service: TestExecutionService = Depends(get_test_execution_service),
+):
+    """
+    Get call logs/session transcripts for a test run by its request ID.
+
+    Args:
+        request_id: The request ID (same as test_run_history.id)
+        user_id: User ID for authorization
+        service: Test execution service
+
+    Returns:
+        Call session data including transcripts from Pranthora backend
+    """
+    try:
+        # First verify that the test run exists and user has access
+        from services.test_history_service import TestRunHistoryService
+
+        run_service = TestRunHistoryService()
+        try:
+            test_run = await run_service.get_test_run(request_id)
+            if not test_run:
+                raise HTTPException(status_code=404, detail=f"Test run '{request_id}' not found")
+
+            # Check user access
+            if test_run.user_id != user_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail="You don't have permission to view call logs for this test run"
+                )
+
+        finally:
+            await run_service.close()
+
+        # Get call logs from Pranthora backend
+        async with PranthoraApiClient() as pranthora_client:
+            try:
+                # Call the Pranthora call-analytics endpoint to get call logs
+                response = await pranthora_client.client.get(
+                    f"{pranthora_client.base_url}/api/v1/call-analytics/call-logs/{request_id}",
+                    headers={
+                        "Authorization": f"Bearer {pranthora_client.api_key}",
+                        "Content-Type": "application/json"
+                    }
+                )
+
+                if response.status_code == 200:
+                    call_logs_data = response.json()
+                    return {
+                        "test_run_id": request_id,
+                        "call_logs": call_logs_data
+                    }
+                elif response.status_code == 404:
+                    return {
+                        "test_run_id": request_id,
+                        "call_logs": None,
+                        "message": "Call session not found - test may not have completed or may have failed"
+                    }
+                else:
+                    logger.error(f"Failed to get call logs from Pranthora: {response.status_code} - {response.text}")
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Failed to retrieve call logs from Pranthora backend"
+                    )
+
+            except Exception as e:
+                logger.error(f"Error communicating with Pranthora backend: {e}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to communicate with Pranthora backend: {str(e)}"
+                )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting call logs: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get call logs: {str(e)}")

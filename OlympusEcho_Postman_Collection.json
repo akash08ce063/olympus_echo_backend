@@ -562,21 +562,30 @@
       "name": "Test History",
       "item": [
         {
-          "name": "Get Test Runs",
+          "name": "List Test Runs by User",
           "request": {
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{base_url}}/v1/test-history?user_id={{user_id}}",
+              "raw": "{{base_url}}/v1/test-history/runs?user_id={{user_id}}&limit=10&offset=0",
               "host": ["{{base_url}}"],
-              "path": ["v1", "test-history"],
+              "path": ["v1", "test-history", "runs"],
               "query": [
                 {
                   "key": "user_id",
                   "value": "{{user_id}}"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                },
+                {
+                  "key": "offset",
+                  "value": "0"
                 }
               ]
-            }
+            },
+            "description": "List test runs for a specific user"
           },
           "response": []
         },
@@ -586,10 +595,189 @@
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{base_url}}/v1/test-history/{{test_run_id}}",
+              "raw": "{{base_url}}/v1/test-history/runs/{{test_run_id}}",
               "host": ["{{base_url}}"],
-              "path": ["v1", "test-history", "{{test_run_id}}"]
+              "path": ["v1", "test-history", "runs", "{{test_run_id}}"]
             }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Test Run with Results",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/test-history/runs/{{test_run_id}}/details",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "test-history", "runs", "{{test_run_id}}", "details"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "List Test Runs by Suite",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/test-history/runs?suite_id={{test_suite_id}}&limit=10&offset=0",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "test-history", "runs"],
+              "query": [
+                {
+                  "key": "suite_id",
+                  "value": "{{test_suite_id}}"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                },
+                {
+                  "key": "offset",
+                  "value": "0"
+                }
+              ]
+            },
+            "description": "List test runs for a specific test suite"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Test Case Result by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/test-history/results/{{test_result_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "test-history", "results", "{{test_result_id}}"]
+            },
+            "description": "Get detailed information about a specific test case result"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Test Case Result with Alerts",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/test-history/results/{{test_result_id}}/details",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "test-history", "results", "{{test_result_id}}", "details"]
+            },
+            "description": "Get a test case result with all associated alerts"
+          },
+          "response": []
+        },
+        {
+          "name": "List Test Case Results by Run",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/test-history/results?run_id={{test_run_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "test-history", "results"],
+              "query": [
+                {
+                  "key": "run_id",
+                  "value": "{{test_run_id}}"
+                }
+              ]
+            },
+            "description": "List all test case results for a specific test run"
+          },
+          "response": []
+        },
+        {
+          "name": "List Test Case Results by Case",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/test-history/results?case_id={{test_case_id}}&limit=10&offset=0",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "test-history", "results"],
+              "query": [
+                {
+                  "key": "case_id",
+                  "value": "{{test_case_id}}"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                },
+                {
+                  "key": "offset",
+                  "value": "0"
+                }
+              ]
+            },
+            "description": "List test case results for a specific test case"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Test Alert by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/test-history/alerts/{{test_alert_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "test-history", "alerts", "{{test_alert_id}}"]
+            },
+            "description": "Get detailed information about a specific test alert"
+          },
+          "response": []
+        },
+        {
+          "name": "List Test Alerts by Result",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/test-history/alerts?result_id={{test_result_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "test-history", "alerts"],
+              "query": [
+                {
+                  "key": "result_id",
+                  "value": "{{test_result_id}}"
+                }
+              ]
+            },
+            "description": "List all alerts for a specific test case result"
+          },
+          "response": []
+        },
+        {
+          "name": "List Test Alerts by Severity",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/test-history/alerts?severity=high&limit=10&offset=0",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "test-history", "alerts"],
+              "query": [
+                {
+                  "key": "severity",
+                  "value": "high"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                },
+                {
+                  "key": "offset",
+                  "value": "0"
+                }
+              ]
+            },
+            "description": "List test alerts filtered by severity level"
           },
           "response": []
         }
@@ -739,6 +927,21 @@
     {
       "key": "web_test_ws_base",
       "value": "ws://localhost:5050",
+      "type": "string"
+    },
+    {
+      "key": "test_run_id",
+      "value": "00000000-0000-0000-0000-000000000000",
+      "type": "string"
+    },
+    {
+      "key": "test_result_id",
+      "value": "00000000-0000-0000-0000-000000000000",
+      "type": "string"
+    },
+    {
+      "key": "test_alert_id",
+      "value": "00000000-0000-0000-0000-000000000000",
       "type": "string"
     }
   ]

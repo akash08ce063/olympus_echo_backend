@@ -8,6 +8,7 @@ from typing import List, Optional
 from uuid import UUID
 
 from services.database_service import DatabaseService
+from services.test_suite_service import TestSuiteService
 from models.test_suite_models import TargetAgentCreate, TargetAgentUpdate, TargetAgent
 from telemetrics.logger import logger
 
@@ -44,7 +45,14 @@ class TargetAgentService(DatabaseService[TargetAgent]):
         return await self.update(agent_id, update_data)
 
     async def delete_target_agent(self, agent_id: UUID) -> bool:
-        """Delete a target agent."""
+        """Delete a target agent (nullifies associated test suite references first)."""
+        # Replace target_agent_id with null in test suites (don't delete them)
+        test_suite_service = TestSuiteService()
+        updated_count = await test_suite_service.nullify_target_agent_references(agent_id)
+        if updated_count > 0:
+            logger.info(f"Set target_agent_id to null for {updated_count} test suites associated with target agent {agent_id}")
+
+        # Delete from local database
         return await self.delete(agent_id)
 
     async def get_target_agent_count(self, user_id: UUID) -> int:

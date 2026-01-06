@@ -35,6 +35,8 @@ class RecordingStorageService:
             file_name: Original filename (will be prefixed with UUID)
             content_type: MIME type of the file (default: audio/wav)
 
+        File path format: recording_files/{uuid}_{filename}
+
         Returns:
             UUID of the uploaded file if successful, None otherwise
         """
@@ -44,9 +46,9 @@ class RecordingStorageService:
             # Generate a unique file ID
             file_id = uuid4()
 
-            # Create the file path in the recording_files folder
-            # Format: recording_files/{uuid}/{original_filename}
-            file_path = f"{file_id}/{file_name}"
+            # Create the file path directly in recording_files bucket
+            # Format: recording_files/{uuid}_{original_filename}
+            file_path = f"{file_id}_{file_name}"
 
             # Upload the file to Supabase storage
             success = await supabase_client.upload_file(
@@ -82,7 +84,7 @@ class RecordingStorageService:
 
         try:
             # Construct the file path
-            file_path = f"{file_id}/{file_name}"
+            file_path = f"{file_id}_{file_name}"
 
             # Download the file from Supabase storage
             file_content = await supabase_client.download_file(
@@ -116,7 +118,7 @@ class RecordingStorageService:
 
         try:
             # Construct the file path
-            file_path = f"{file_id}/{file_name}"
+            file_path = f"{file_id}_{file_name}"
 
             # Delete the file from Supabase storage
             success = await supabase_client.delete_file(
@@ -151,7 +153,7 @@ class RecordingStorageService:
 
         try:
             # Construct the file path
-            file_path = f"{file_id}/{file_name}"
+            file_path = f"{file_id}_{file_name}"
 
             # Get the signed URL from Supabase storage
             # Note: This assumes the Supabase client has a method for creating signed URLs
@@ -199,5 +201,5 @@ class RecordingStorageService:
             "file_id": str(file_id),
             "file_name": file_name,
             "bucket": self.bucket_name,
-            "path": f"{file_id}/{file_name}"
+            "path": f"{file_id}_{file_name}"
         }

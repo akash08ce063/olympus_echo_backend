@@ -7,9 +7,18 @@ simulate conversations, evaluate results, and store execution history.
 
 import asyncio
 import json
+import base64
+import time
+import uuid
+import wave
+import audioop
+import io
 from typing import List, Optional, Dict, Any
 from uuid import UUID, uuid4
 from datetime import datetime
+
+import websockets
+from websockets.exceptions import ConnectionClosed, ConnectionClosedOK, ConnectionClosedError
 
 from services.database_service import DatabaseService
 from services.test_case_service import TestCaseService
@@ -17,6 +26,7 @@ from services.test_suite_service import TestSuiteService
 from services.target_agent_service import TargetAgentService
 from services.user_agent_service import UserAgentService
 from services.test_history_service import TestRunHistoryService, TestCaseResultService
+from services.recording_storage_service import RecordingStorageService
 from services.pranthora_api_client import PranthoraApiClient
 from models.test_suite_models import (
     TestSuite, TestCase, TestRunHistory, TestCaseResult,
@@ -36,13 +46,20 @@ class TestExecutionService:
         self.user_agent_service = UserAgentService()
         self.test_run_service = TestRunHistoryService()
         self.test_result_service = TestCaseResultService()
+        self.recording_service = RecordingStorageService()
         self.pranthora_client = PranthoraApiClient()
+
+        # Recording setup
+        self.sample_rate = 8000  # μ-law sample rate
+
+
 
     async def run_test_suite(
         self,
         test_suite_id: UUID,
         user_id: UUID,
-        concurrent_calls: Optional[int] = None
+        concurrent_calls: Optional[int] = None,
+        request_id: Optional[str] = None
     ) -> UUID:
         """
         Run all active test cases in a test suite.
@@ -51,6 +68,7 @@ class TestExecutionService:
             test_suite_id: ID of the test suite to run
             user_id: ID of the user running the test
             concurrent_calls: Number of concurrent calls (overrides default)
+            request_id: Request ID from x-pranthora-callid header (used as primary key)
 
         Returns:
             UUID of the created test run
@@ -73,7 +91,7 @@ class TestExecutionService:
                 raise ValueError(f"No active test cases found in test suite {test_suite_id}")
 
             # Create test run record
-            test_run_id = await self._create_test_run(test_suite_id, user_id, len(test_cases))
+            test_run_id = await self._create_test_run(test_suite_id, user_id, len(test_cases), request_id)
 
             # Execute test cases asynchronously
             asyncio.create_task(
@@ -91,7 +109,8 @@ class TestExecutionService:
         self,
         test_case_id: UUID,
         user_id: UUID,
-        concurrent_calls: Optional[int] = None
+        concurrent_calls: Optional[int] = None,
+        request_id: Optional[str] = None
     ) -> UUID:
         """
         Run a single test case.
@@ -100,6 +119,7 @@ class TestExecutionService:
             test_case_id: ID of the test case to run
             user_id: ID of the user running the test
             concurrent_calls: Number of concurrent calls (overrides default)
+            request_id: Request ID from x-pranthora-callid header (used as primary key)
 
         Returns:
             UUID of the created test run
@@ -116,7 +136,7 @@ class TestExecutionService:
                 raise ValueError(f"User {user_id} does not have access to test case {test_case_id}")
 
             # Create test run record
-            test_run_id = await self._create_test_run(test_case.test_suite_id, user_id, 1)
+            test_run_id = await self._create_test_run(test_case.test_suite_id, user_id, 1, request_id)
 
             # Execute single test case asynchronously
             asyncio.create_task(
@@ -130,7 +150,7 @@ class TestExecutionService:
             logger.error(f"Error starting single test case execution: {e}")
             raise
 
-    async def _create_test_run(self, test_suite_id: UUID, user_id: UUID, total_cases: int) -> UUID:
+    async def _create_test_run(self, test_suite_id: UUID, user_id: UUID, total_cases: int, request_id: Optional[str] = None) -> UUID:
         """Create a new test run record."""
         run_data = {
             "test_suite_id": str(test_suite_id),
@@ -143,7 +163,14 @@ class TestExecutionService:
             "started_at": datetime.utcnow().isoformat(),
         }
 
-        run_id = await self.database_service.create(run_data)
+        # If request_id is provided, use it as the primary key
+        if request_id:
+            run_data["id"] = request_id
+            # Use create_with_id instead of create to specify the ID
+            run_id = await self.database_service.create_with_id(run_data)
+        else:
+            run_id = await self.database_service.create(run_data)
+
         logger.info(f"Created test run: {run_id}")
         return run_id
 
@@ -237,14 +264,26 @@ class TestExecutionService:
                 user_agent = await self.user_agent_service.get_user_agent(test_suite.user_agent_id)
 
             if not target_agent:
-                raise ValueError(f"Target agent not found for test suite {test_case.test_suite_id}")
+                logger.warning(f"Target agent not found for test suite {test_case.test_suite_id}")
+                # For development/testing, allow execution without target agent but fail gracefully
+                return {
+                    "result_id": None,
+                    "status": "fail",
+                    "error": f"Target agent not found for test suite {test_case.test_suite_id}"
+                }
 
             if not user_agent:
-                raise ValueError(f"User agent not found for test suite {test_case.test_suite_id}")
+                logger.warning(f"User agent not found for test suite {test_case.test_suite_id}")
+                # For development/testing, allow execution without user agent but fail gracefully
+                return {
+                    "result_id": None,
+                    "status": "fail",
+                    "error": f"User agent not found for test suite {test_case.test_suite_id}"
+                }
 
             # Simulate conversation using goals/prompts
             conversation_result = await self._simulate_conversation(
-                test_case, target_agent, user_agent, concurrent_calls or test_case.default_concurrent_calls
+                test_case, target_agent, user_agent, concurrent_calls or test_case.default_concurrent_calls, test_run_id
             )
 
             # Evaluate results based on evaluation criteria
@@ -264,7 +303,11 @@ class TestExecutionService:
                 conversation_logs=conversation_result.get("conversation_logs", []),
                 evaluation_result=evaluation_result,
                 error_message=conversation_result.get("error_message"),
-                pcm_frames=conversation_result.get("audio_data", b"")
+                pcm_frames=conversation_result.get("audio_data", b""),
+                sample_rate=8000,  # Both agents use 8kHz mulaw
+                num_channels=1,  # Mono - combined audio from both agents
+                concurrent_calls=conversation_result.get("concurrent_calls", 1),
+                wav_file_ids=conversation_result.get("wav_file_ids", [])
             )
 
             return {
@@ -284,7 +327,11 @@ class TestExecutionService:
                     test_suite_id=test_case.test_suite_id,
                     status="fail",
                     error_message=str(e),
-                    pcm_frames=b""
+                    pcm_frames=b"",
+                    sample_rate=8000,  # Use 8kHz for consistency
+                    num_channels=1,  # Mono format
+                    concurrent_calls=1,
+                    wav_file_ids=[]
                 )
                 return {"result_id": result_id, "status": "fail", "error": str(e)}
             except Exception as store_error:
@@ -296,54 +343,558 @@ class TestExecutionService:
         test_case: TestCase,
         target_agent,
         user_agent,
-        concurrent_calls: int
+        concurrent_calls: int,
+        request_id: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Simulate a conversation using the test case goals."""
+        """
+        Simulate conversations by connecting to user agent and target agent websockets,
+        bridging audio between them, and recording the conversation(s).
+
+        Supports concurrent calls - creates multiple simultaneous conversations when concurrent_calls > 1.
+        """
+        try:
+            start_time = time.time()
+
+            logger.info(f"Starting conversation simulation for test case {test_case.id} with {concurrent_calls} concurrent call(s)")
+            logger.info(f"Target agent: {target_agent.websocket_url}, User agent: {user_agent.pranthora_agent_id}")
+
+            # Validate agents have required information
+            if not target_agent.websocket_url:
+                raise ValueError("Target agent missing websocket_url")
+
+            if not user_agent.pranthora_agent_id:
+                raise ValueError("User agent missing pranthora_agent_id")
+
+            # Ensure concurrent_calls is at least 1
+            concurrent_calls = max(1, concurrent_calls)
+
+            # Create concurrent conversations
+            conversation_tasks = []
+            for call_num in range(concurrent_calls):
+                task = asyncio.create_task(
+                    self._simulate_single_conversation(
+                        test_case, target_agent, user_agent, call_num + 1, request_id
+                    )
+                )
+                conversation_tasks.append(task)
+
+            # Wait for all conversations to complete
+            conversation_results = await asyncio.gather(*conversation_tasks, return_exceptions=True)
+
+            # Process results
+            all_conversation_logs = []
+            all_audio_data = bytearray()
+            total_duration = 0
+            wav_file_ids = []
+            successful_calls = 0
+
+            for i, result in enumerate(conversation_results):
+                if isinstance(result, Exception):
+                    logger.error(f"Conversation {i+1} failed: {result}")
+                    continue
+
+                if result.get("success"):
+                    successful_calls += 1
+                    all_conversation_logs.extend(result.get("conversation_logs", []))
+                    all_audio_data.extend(result.get("audio_data", b""))
+                    total_duration = max(total_duration, result.get("duration_seconds", 0))
+
+                    if result.get("wav_file_id"):
+                        wav_file_ids.append(result["wav_file_id"])
+
+            duration_seconds = time.time() - start_time
+
+            logger.info(
+                f"All conversations completed: {successful_calls}/{concurrent_calls} successful, "
+                f"{len(all_conversation_logs)} total turns, "
+                f"{len(all_audio_data)} bytes combined audio, {duration_seconds:.2f}s total duration"
+            )
+
+            return {
+                "conversation_logs": all_conversation_logs,
+                "audio_data": bytes(all_audio_data),
+                "combined_audio_bytes": len(all_audio_data),
+                "audio_format": "mulaw 8kHz",
+                "duration_seconds": duration_seconds,
+                "concurrent_calls": concurrent_calls,
+                "successful_calls": successful_calls,
+                "wav_file_ids": wav_file_ids,
+                "success": successful_calls > 0
+            }
+
+        except Exception as e:
+            logger.error(f"Error simulating conversations: {e}", exc_info=True)
+            return {
+                "conversation_logs": [],
+                "audio_data": b"",
+                "combined_audio_bytes": 0,
+                "error_message": str(e),
+                "success": False
+            }
+
+    async def _simulate_single_conversation(
+        self,
+        test_case: TestCase,
+        target_agent,
+        user_agent,
+        call_number: int,
+        request_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Simulate a single conversation between target and user agents.
+        Used internally for concurrent call support.
+        """
         try:
             conversation_logs = []
-            audio_data = b""
+            combined_audio_data = bytearray()
+            conv_start_time = time.time()
 
-            # For now, simulate a basic conversation
-            # In a real implementation, this would connect to the actual agents
-            # and execute the goals/prompts
+            logger.info(f"[Call {call_number}] Starting conversation simulation")
 
-            logger.info(f"Simulating conversation for test case {test_case.id}")
+            # Use Pranthora base URL from config to construct websocket URLs
+            from static_memory_cache import StaticMemoryCache
+            pranthora_base_url = StaticMemoryCache.get_pranthora_base_url()
+            if not pranthora_base_url:
+                raise ValueError("Pranthora base URL not configured")
 
-            # Mock conversation simulation
-            for i, goal in enumerate(test_case.goals):
+            # Convert HTTP to WS
+            if pranthora_base_url.startswith("https://"):
+                base_ws_url = pranthora_base_url.replace("https://", "wss://")
+            else:
+                base_ws_url = pranthora_base_url.replace("http://", "ws://")
+
+            # For target agent, we still need a websocket URL. If target_agent has a websocket_url, use it,
+            # otherwise construct one. But for now, let's use the configured URL and replace the port
+            target_ws_url = target_agent.websocket_url
+            if not target_ws_url.startswith(("ws://", "wss://")):
+                raise ValueError(f"Invalid target agent websocket URL: {target_ws_url}")
+
+            # Replace the port in target_ws_url with the port from pranthora_base_url
+            import re
+            port_match = re.search(r':(\d+)', pranthora_base_url)
+            if port_match:
+                pranthora_port = port_match.group(1)
+                target_ws_url = re.sub(r':\d+', f':{pranthora_port}', target_ws_url)
+
+            user_ws_url = f"{base_ws_url}/api/call/media-stream/agents/{user_agent.pranthora_agent_id}"
+
+            # Generate unique call SIDs for this conversation
+            call_sid_target = str(uuid.uuid4())
+            call_sid_user = str(uuid.uuid4())
+
+            # Add call_sid to URLs
+            if "call_sid=" not in target_ws_url:
+                separator = "&" if "?" in target_ws_url else "?"
+                target_ws_url = f"{target_ws_url}{separator}call_sid={call_sid_target}"
+            user_ws_url = f"{user_ws_url}?call_sid={call_sid_user}"
+
+            # Queues for this conversation
+            target_to_user_queue = asyncio.Queue()
+            user_to_target_queue = asyncio.Queue()
+            stop_event = asyncio.Event()
+
+            # Isolated PCM recording buffer for this specific call
+            isolated_pcm_frames = bytearray()
+
+            # Audio recording for this conversation only
+            def record_audio_bridge(audio_bytes: bytes, source: str):
+                """Record audio from bridge for this isolated conversation."""
+                try:
+                    combined_audio_data.extend(audio_bytes)
+
+                    # Convert μ-law to PCM for this call's isolated WAV recording
+                    pcm = audioop.ulaw2lin(audio_bytes, 2)  # 16-bit PCM
+                    isolated_pcm_frames.extend(pcm)
+
+                    conversation_logs.append({
+                        "call_number": call_number,
+                        "turn": len(conversation_logs),
+                        "type": f"{source}_audio",
+                        "content": f"Audio received from {source} agent ({len(audio_bytes)} bytes)",
+                        "timestamp": datetime.utcnow().isoformat()
+                    })
+                except Exception as e:
+                    logger.error(f"[Call {call_number}] Bridge recording error from {source}: {e}")
+
+            # Log conversation start
+            conversation_logs.append({
+                "call_number": call_number,
+                "turn": 0,
+                "type": "system",
+                "content": f"Starting conversation test with {len(test_case.goals)} goals",
+                "timestamp": datetime.utcnow().isoformat()
+            })
+
+            # Start websocket connections for this conversation
+            target_task = asyncio.create_task(
+                self._connect_target_agent(
+                    target_ws_url,
+                    call_sid_target,
+                    target_to_user_queue,
+                    user_to_target_queue,
+                    stop_event,
+                    lambda audio: record_audio_bridge(audio, "target"),
+                    conversation_logs
+                )
+            )
+
+            user_task = asyncio.create_task(
+                self._connect_user_agent(
+                    user_ws_url,
+                    call_sid_user,
+                    target_to_user_queue,
+                    user_to_target_queue,
+                    stop_event,
+                    lambda audio: record_audio_bridge(audio, "user"),
+                    conversation_logs,
+                    request_id
+                )
+            )
+
+            # Wait for conversation to complete or timeout
+            timeout_seconds = test_case.timeout_seconds or 300
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(target_task, user_task, return_exceptions=True),
+                    timeout=timeout_seconds
+                )
+            except asyncio.TimeoutError:
+                logger.info(f"[Call {call_number}] Conversation timeout reached ({timeout_seconds}s)")
                 conversation_logs.append({
-                    "turn": i + 1,
-                    "type": "user_input",
-                    "content": goal.get("text", ""),
+                    "call_number": call_number,
+                    "turn": len(conversation_logs),
+                    "type": "system",
+                    "content": f"Conversation timeout reached after {timeout_seconds} seconds",
                     "timestamp": datetime.utcnow().isoformat()
                 })
+            finally:
+                # Stop connections
+                stop_event.set()
+                target_task.cancel()
+                user_task.cancel()
+                await asyncio.gather(target_task, user_task, return_exceptions=True)
 
-                # Simulate agent response
-                conversation_logs.append({
-                    "turn": i + 1,
-                    "type": "agent_response",
-                    "content": f"Simulated response to: {goal.get('text', '')}",
-                    "timestamp": datetime.utcnow().isoformat()
-                })
+            conv_duration = time.time() - conv_start_time
+            audio_data = bytes(combined_audio_data)
 
-            # Generate mock audio data (empty for now)
-            # In real implementation, this would be actual conversation audio
+            # Upload WAV file for this conversation
+            wav_filename = f"test_case_{test_case.id}_call_{call_number}_recording.wav"
+            wav_file_id = None
+
+            try:
+                # Create WAV file data in memory using this call's isolated buffer
+                wav_buffer = io.BytesIO()
+                with wave.open(wav_buffer, 'wb') as wf:
+                    wf.setnchannels(1)      # Mono
+                    wf.setsampwidth(2)      # 16-bit PCM
+                    wf.setframerate(self.sample_rate)
+                    wf.writeframes(isolated_pcm_frames)  # Use isolated buffer
+
+                wav_data = wav_buffer.getvalue()
+
+                # Upload WAV file to Supabase
+                wav_file_id = await self.recording_service.upload_recording_file(
+                    file_content=wav_data,
+                    file_name=wav_filename,
+                    content_type="audio/wav"
+                )
+
+                if wav_file_id:
+                    logger.info(f"[Call {call_number}] 📤 Isolated WAV file uploaded: {wav_file_id} ({len(isolated_pcm_frames)} PCM bytes)")
+                else:
+                    logger.error(f"[Call {call_number}] Failed to upload isolated WAV file")
+
+            except Exception as e:
+                logger.error(f"[Call {call_number}] Failed to upload isolated WAV file: {e}")
+
+            logger.info(
+                f"[Call {call_number}] Isolated conversation completed: {len(conversation_logs)} turns, "
+                f"{len(audio_data)} bytes audio, {len(isolated_pcm_frames)} PCM bytes, {conv_duration:.2f}s duration"
+            )
 
             return {
                 "conversation_logs": conversation_logs,
                 "audio_data": audio_data,
-                "duration_seconds": len(test_case.goals) * 5,  # Mock duration
+                "combined_audio_bytes": len(audio_data),
+                "audio_format": "mulaw 8kHz",
+                "duration_seconds": conv_duration,
+                "call_number": call_number,
+                "wav_file_id": str(wav_file_id) if wav_file_id else None,
                 "success": True
             }
 
         except Exception as e:
-            logger.error(f"Error simulating conversation: {e}")
+            logger.error(f"[Call {call_number}] Error simulating conversation: {e}", exc_info=True)
             return {
                 "conversation_logs": [],
                 "audio_data": b"",
+                "combined_audio_bytes": 0,
                 "error_message": str(e),
                 "success": False
             }
+
+    async def _connect_target_agent(
+        self,
+        ws_url: str,
+        call_sid: str,
+        outgoing_queue: asyncio.Queue,
+        incoming_queue: asyncio.Queue,
+        stop_event: asyncio.Event,
+        record_callback: callable,
+        conversation_logs: List[Dict[str, Any]]
+    ):
+        """Connect to target agent websocket (media-stream endpoint)."""
+        logger.info(f"[Target] Connecting to {ws_url}")
+
+        try:
+            async with websockets.connect(ws_url) as websocket:
+                # Send start event
+                start_event = {
+                    "event": "start",
+                    "sequenceNumber": "1",
+                    "start": {
+                        "accountSid": "AC_SIMULATION",
+                        "callSid": call_sid,
+                        "streamSid": f"stream_{call_sid}",
+                        "tracks": ["inbound"],
+                        "customParameters": {}
+                    },
+                    "streamSid": f"stream_{call_sid}"
+                }
+                await websocket.send(json.dumps(start_event))
+                logger.info(f"[Target] Sent start event")
+
+                # Read from target agent
+                async def read_from_ws():
+                    try:
+                        async for message in websocket:
+                            if stop_event.is_set():
+                                break
+
+                            data = json.loads(message)
+                            event_type = data.get("event")
+
+                            if event_type == "media":
+                                payload = data["media"]["payload"]
+                                audio_bytes = base64.b64decode(payload)
+
+                                # Record audio from target agent
+                                record_callback(audio_bytes)
+
+                                # Send to user agent
+                                await outgoing_queue.put(audio_bytes)
+
+                            elif event_type == "mark":
+                                logger.info(f"[Target] Mark: {data.get('mark', {}).get('name')}")
+                            elif event_type == "clear":
+                                logger.info(f"[Target] Clear received")
+                                # Clear incoming queue
+                                while not incoming_queue.empty():
+                                    try:
+                                        incoming_queue.get_nowait()
+                                    except asyncio.QueueEmpty:
+                                        break
+                            elif event_type == "stop":
+                                logger.info(f"[Target] Stop received")
+                                break
+                    except Exception as e:
+                        logger.error(f"[Target] Read error: {e}")
+
+                # Write to target agent (20ms cadence)
+                async def write_to_ws():
+                    stream_sid = f"stream_{call_sid}"
+                    next_tick = time.time()
+
+                    try:
+                        while not stop_event.is_set():
+                            # Maintain 20ms cadence
+                            next_tick += 0.02
+                            sleep_time = next_tick - time.time()
+                            if sleep_time > 0:
+                                await asyncio.sleep(sleep_time)
+
+                            payload_to_send = None
+
+                            # Check for audio from user agent
+                            if not incoming_queue.empty():
+                                try:
+                                    audio_data = incoming_queue.get_nowait()
+                                    payload_to_send = base64.b64encode(audio_data).decode('utf-8')
+                                except asyncio.QueueEmpty:
+                                    pass
+
+                            # Send silence if no audio
+                            if not payload_to_send:
+                                silence = b"\xff" * 160  # μ-law silence
+                                payload_to_send = base64.b64encode(silence).decode('utf-8')
+
+                            # Send media event
+                            media_event = {
+                                "event": "media",
+                                "streamSid": stream_sid,
+                                "media": {
+                                    "payload": payload_to_send
+                                }
+                            }
+                            await websocket.send(json.dumps(media_event))
+
+                    except asyncio.CancelledError:
+                        pass
+                    except (ConnectionClosedOK, ConnectionClosedError):
+                        # Normal websocket closure or clean disconnect - not an error
+                        logger.debug(f"[Target] WebSocket closed normally")
+                        pass
+                    except Exception as e:
+                        logger.error(f"[Target] Write error: {e}")
+
+                reader_task = asyncio.create_task(read_from_ws())
+                writer_task = asyncio.create_task(write_to_ws())
+
+                await reader_task
+                writer_task.cancel()
+                try:
+                    await writer_task
+                except asyncio.CancelledError:
+                    pass
+
+        except Exception as e:
+            logger.error(f"[Target] Connection failed: {e}")
+            raise
+
+    async def _connect_user_agent(
+        self,
+        ws_url: str,
+        call_sid: str,
+        incoming_queue: asyncio.Queue,
+        outgoing_queue: asyncio.Queue,
+        stop_event: asyncio.Event,
+        record_callback: callable,
+        conversation_logs: List[Dict[str, Any]],
+        request_id: Optional[str] = None
+    ):
+        """Connect to user agent websocket (media-stream endpoint)."""
+        logger.info(f"[User] Connecting to {ws_url}")
+
+        # Add request_id to headers if provided
+        additional_headers = {}
+        if request_id:
+            additional_headers["x-pranthora-callid"] = request_id
+            logger.info(f"[User] Request ID: {request_id}")
+
+        try:
+            async with websockets.connect(ws_url, additional_headers=additional_headers) as websocket:
+                # Send start event (Twilio-style)
+                start_event = {
+                    "event": "start",
+                    "sequenceNumber": "1",
+                    "start": {
+                        "accountSid": "AC_SIMULATION",
+                        "callSid": call_sid,
+                        "streamSid": f"stream_{call_sid}",
+                        "tracks": ["inbound"],
+                        "customParameters": {},
+                    },
+                    "streamSid": f"stream_{call_sid}",
+                }
+                await websocket.send(json.dumps(start_event))
+                logger.info(f"[User] Sent start event")
+
+                # Read from user agent (JSON messages)
+                async def read_from_ws():
+                    try:
+                        async for message in websocket:
+                            if stop_event.is_set():
+                                break
+
+                            data = json.loads(message)
+                            event_type = data.get("event")
+
+                            if event_type == "media":
+                                payload = data["media"]["payload"]
+                                audio_bytes = base64.b64decode(payload)
+
+                                # Record audio from user agent
+                                record_callback(audio_bytes)
+
+                                # Send to target agent
+                                await outgoing_queue.put(audio_bytes)
+
+                            elif event_type == "mark":
+                                logger.info(f"[User] Mark: {data.get('mark', {}).get('name')}")
+                            elif event_type == "clear":
+                                logger.info(f"[User] Clear received")
+                                # Clear incoming queue
+                                while not incoming_queue.empty():
+                                    try:
+                                        incoming_queue.get_nowait()
+                                    except asyncio.QueueEmpty:
+                                        break
+                            elif event_type == "stop":
+                                logger.info(f"[User] Stop received")
+                                break
+                    except Exception as e:
+                        logger.error(f"[User] Read error: {e}")
+
+                # Write to user agent (20ms cadence, JSON media events)
+                async def write_to_ws():
+                    stream_sid = f"stream_{call_sid}"
+                    next_tick = time.time()
+
+                    try:
+                        while not stop_event.is_set():
+                            # Maintain 20ms cadence
+                            next_tick += 0.02
+                            sleep_time = next_tick - time.time()
+                            if sleep_time > 0:
+                                await asyncio.sleep(sleep_time)
+
+                            payload_to_send = None
+
+                            # Check for audio from target agent
+                            if not incoming_queue.empty():
+                                try:
+                                    audio_data = incoming_queue.get_nowait()
+                                    payload_to_send = base64.b64encode(audio_data).decode('utf-8')
+                                except asyncio.QueueEmpty:
+                                    pass
+
+                            # Send silence if no audio
+                            if not payload_to_send:
+                                silence = b"\xff" * 160  # μ-law silence
+                                payload_to_send = base64.b64encode(silence).decode('utf-8')
+
+                            # Send media event
+                            media_event = {
+                                "event": "media",
+                                "streamSid": stream_sid,
+                                "media": {
+                                    "payload": payload_to_send
+                                }
+                            }
+                            await websocket.send(json.dumps(media_event))
+
+                    except asyncio.CancelledError:
+                        pass
+                    except (ConnectionClosedOK, ConnectionClosedError):
+                        # Normal websocket closure or clean disconnect - not an error
+                        logger.debug(f"[User] WebSocket closed normally")
+                        pass
+                    except Exception as e:
+                        logger.error(f"[User] Write error: {e}")
+
+                reader_task = asyncio.create_task(read_from_ws())
+                writer_task = asyncio.create_task(write_to_ws())
+
+                await reader_task
+                writer_task.cancel()
+                try:
+                    await writer_task
+                except asyncio.CancelledError:
+                    pass
+
+        except Exception as e:
+            logger.error(f"[User] Connection failed: {e}")
+            raise
 
     async def _evaluate_test_results(
         self,
@@ -366,13 +917,16 @@ class TestExecutionService:
             # the conversation against the evaluation criteria
 
             for i, criterion in enumerate(test_case.evaluation_criteria):
+                # Handle evaluation_criteria as strings (not dictionaries)
+                criterion_text = criterion if isinstance(criterion, str) else criterion.get("expected", "") if isinstance(criterion, dict) else str(criterion)
+                
                 criterion_result = {
                     "criterion_id": i + 1,
-                    "type": criterion.get("type", "unknown"),
-                    "expected": criterion.get("expected", ""),
+                    "type": "text_match" if isinstance(criterion, str) else criterion.get("type", "unknown") if isinstance(criterion, dict) else "unknown",
+                    "expected": criterion_text,
                     "passed": True,  # Mock pass for now
                     "score": 1.0,
-                    "details": f"Mock evaluation of criterion {i + 1}"
+                    "details": f"Mock evaluation of criterion: {criterion_text}"
                 }
 
                 evaluation_result["criteria_evaluated"].append(criterion_result)

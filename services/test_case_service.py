@@ -101,3 +101,32 @@ class TestCaseService(DatabaseService[TestCase]):
         except Exception as e:
             logger.error(f"Error counting test cases for suite {suite_id}: {e}")
             raise
+
+    async def delete_test_cases_by_suite_id(self, suite_id: UUID) -> int:
+        """Delete all test cases associated with a test suite ID."""
+        supabase_client = await self._get_client()
+
+        try:
+            # First get all test cases with this test_suite_id
+            test_cases = await supabase_client.select(
+                self.table_name,
+                filters={'test_suite_id': str(suite_id)}
+            )
+
+            deleted_count = 0
+            if test_cases:
+                for case in test_cases:
+                    try:
+                        # Delete each test case
+                        await supabase_client.delete(self.table_name, {'id': case['id']})
+                        deleted_count += 1
+                        logger.info(f"Deleted test case {case['id']} associated with test suite {suite_id}")
+                    except Exception as e:
+                        logger.error(f"Failed to delete test case {case['id']}: {e}")
+
+            logger.info(f"Deleted {deleted_count} test cases associated with test suite {suite_id}")
+            return deleted_count
+
+        except Exception as e:
+            logger.error(f"Error deleting test cases by test suite ID: {e}")
+            return 0
