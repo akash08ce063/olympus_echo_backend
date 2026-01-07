@@ -128,6 +128,29 @@ class SupabaseClient:
             logger.error(f"Error deleting file from {bucket_name}/{file_path}: {str(e)}")
             return False
 
+    async def create_signed_url(self, bucket_name: str, file_path: str, expires_in: int = 3600) -> Optional[str]:
+        """Create a signed URL for file access."""
+        try:
+            result = await self.async_client.storage.from_(bucket_name).create_signed_url(
+                path=file_path,
+                expires_in=expires_in
+            )
+            if result and 'signedURL' in result:
+                return result['signedURL']
+            return None
+        except Exception as e:
+            logger.error(f"Error creating signed URL for {bucket_name}/{file_path}: {str(e)}")
+            return None
+
+    def get_public_url(self, bucket_name: str, file_path: str) -> str:
+        """Get public URL for a file (bucket must be public)."""
+        try:
+            result = self.async_client.storage.from_(bucket_name).get_public_url(file_path)
+            return result
+        except Exception as e:
+            logger.error(f"Error getting public URL for {bucket_name}/{file_path}: {str(e)}")
+            return None
+
     async def execute_raw_query(self, query: str) -> Optional[List[Dict[str, Any]]]:
         """Execute a raw SQL query using PostgREST RPC."""
         try:

@@ -9,6 +9,7 @@ from typing import List, Optional, Dict, Any
 from uuid import UUID
 
 from services.database_service import DatabaseService
+from services.test_case_service import TestCaseService
 from models.test_suite_models import (
     TestSuiteCreate, TestSuiteUpdate, TestSuite, TestSuiteWithRelations,
     TestCase, TargetAgent, UserAgent
@@ -110,11 +111,14 @@ class TestSuiteService(DatabaseService[TestSuite]):
                         updated_at=ua_data['updated_at']
                     )
 
-            # Get test cases
-            test_cases = await self._get_test_cases_for_suite(suite_id)
+            # Get individual test case statuses first
+            test_case_statuses = await self._get_test_case_statuses(suite_id)
 
-            # Get test case status
-            test_case_status = await self._get_test_case_status(suite_id)
+            # Get test cases with their statuses
+            test_cases = await self._get_test_cases_for_suite(suite_id, test_case_statuses)
+
+            # Get suite status from all test runs
+            suite_status = await self._get_suite_status(suite_id)
 
             return TestSuiteWithRelations(
                 id=suite_data['id'],
@@ -128,67 +132,45 @@ class TestSuiteService(DatabaseService[TestSuite]):
                 target_agent=target_agent,
                 user_agent=user_agent,
                 test_cases=test_cases,
-                test_case_status=test_case_status
+                suite_status=suite_status
             )
 
         except Exception as e:
             logger.error(f"Error getting test suite with relations: {e}")
             raise
 
-    async def _get_test_case_status(self, suite_id: UUID) -> Dict[str, str]:
-        """Get the latest status for each test case in the suite."""
+    async def _get_test_cases_for_suite(self, suite_id: UUID, test_case_statuses: Dict[str, str] = None) -> List[TestCase]:
+        """Get test cases for a suite with their current status."""
         try:
             from supabase.client import acreate_client
             from static_memory_cache import StaticMemoryCache
 
-            # Get database config directly
             db_config = StaticMemoryCache.get_database_config()
             supabase_url = db_config.get("supabase_url")
             supabase_key = db_config.get("supabase_key")
 
             if not supabase_url or not supabase_key:
-                logger.warning("Supabase URL and Key not configured, returning empty status dict")
-                return {}
-
-            # Create raw Supabase client directly
-            async_client = await acreate_client(supabase_url, supabase_key)
-
-            # Query test_case_results to get latest status for each test case in this suite
-            result = await async_client.table('test_case_results').select(
-                'test_case_id, status, test_run_id, created_at'
-            ).eq('test_suite_id', str(suite_id)).order('created_at', desc=True).execute()
-
-            status_dict = {}
-            seen_cases = set()
-
-            # Process results to get the latest status for each test case
-            for record in result.data if result.data else []:
-                test_case_id = record['test_case_id']
-                if test_case_id not in seen_cases:
-                    status_dict[test_case_id] = record['status']
-                    seen_cases.add(test_case_id)
-
-            return status_dict
-
-        except Exception as e:
-            logger.error(f"Error getting test case status for suite {suite_id}: {e}")
-            return {}
-
-    async def _get_test_cases_for_suite(self, suite_id: UUID) -> List[TestCase]:
-        """Get test cases for a suite."""
-        supabase_client = await self._get_client()
-
-        try:
-            test_cases_result = await supabase_client.select(
-                "test_cases",
-                filters={"test_suite_id": str(suite_id), "is_active": True},
-                order_by="order_index,created_at"
-            )
-
-            if not test_cases_result:
                 return []
 
-            return [TestCase(**tc_data) for tc_data in test_cases_result]
+            async_client = await acreate_client(supabase_url, supabase_key)
+
+            # Query test cases directly
+            result = await async_client.table('test_cases').select('*').eq(
+                'test_suite_id', str(suite_id)
+            ).eq('is_active', True).order('order_index').execute()
+
+            if not result.data:
+                return []
+
+            # Add status to each test case
+            test_cases = []
+            for tc_data in result.data:
+                tc_id = str(tc_data['id'])
+                status = test_case_statuses.get(tc_id, "pending") if test_case_statuses else "pending"
+                tc_data['status'] = status
+                test_cases.append(TestCase(**tc_data))
+
+            return test_cases
         except Exception as e:
             logger.error(f"Error getting test cases for suite {suite_id}: {e}")
             return []
@@ -267,11 +249,132 @@ class TestSuiteService(DatabaseService[TestSuite]):
             logger.error(f"Error nullifying target agent references in test suites: {e}")
             return 0
 
+    async def nullify_test_run_references(self, test_suite_id: UUID) -> int:
+        """Set test_suite_id to null for all test runs associated with a test suite ID."""
+        try:
+            from supabase.client import acreate_client
+            from static_memory_cache import StaticMemoryCache
+
+            # Get database config directly
+            db_config = StaticMemoryCache.get_database_config()
+            supabase_url = db_config.get("supabase_url")
+            supabase_key = db_config.get("supabase_key")
+
+            if not supabase_url or not supabase_key:
+                raise ValueError("Supabase URL and Key must be configured")
+
+            # Create raw Supabase client directly
+            async_client = await acreate_client(supabase_url, supabase_key)
+
+            # Update test_run_history to set test_suite_id to null where it matches
+            result = await async_client.table('test_run_history').update(
+                {'test_suite_id': None}
+            ).eq('test_suite_id', str(test_suite_id)).execute()
+
+            updated_count = len(result.data) if result.data else 0
+            if updated_count > 0:
+                logger.info(f"Nullified test_suite_id references for {updated_count} test runs")
+
+            return updated_count
+
+        except Exception as e:
+            logger.error(f"Error nullifying test run references in test_run_history: {e}")
+            return 0
 
     async def delete_test_suite(self, suite_id: UUID) -> bool:
-        """Delete a test suite."""
+        """Delete a test suite (deletes all associated test cases and nullifies test runs first)."""
+        # Delete all test cases associated with this test suite first
+        test_case_service = TestCaseService()
+        try:
+            deleted_cases = await test_case_service.delete_test_cases_by_suite_id(suite_id)
+            if deleted_cases > 0:
+                logger.info(f"Deleted {deleted_cases} test cases associated with test suite {suite_id}")
+        except Exception as e:
+            logger.error(f"Error deleting test cases for test suite {suite_id}: {e}")
+        finally:
+            await test_case_service.close()
+
+        # Nullify all test runs associated with this test suite
+        nullified_runs = await self.nullify_test_run_references(suite_id)
+        if nullified_runs > 0:
+            logger.info(f"Nullified test_suite_id references for {nullified_runs} test runs")
+
+        # Now delete the test suite
         return await self.delete(suite_id)
 
     async def get_test_suite_count(self, user_id: UUID) -> int:
         """Get count of test suites for a user."""
         return await self.count_by_user(user_id)
+
+    async def _get_suite_status(self, suite_id: UUID) -> Optional[str]:
+        """
+        Get suite status based on latest test run for the suite.
+        
+        Status values: pending, running, failed, completed
+        """
+        try:
+            from supabase.client import acreate_client
+            from static_memory_cache import StaticMemoryCache
+
+            db_config = StaticMemoryCache.get_database_config()
+            supabase_url = db_config.get("supabase_url")
+            supabase_key = db_config.get("supabase_key")
+
+            if not supabase_url or not supabase_key:
+                return None
+
+            async_client = await acreate_client(supabase_url, supabase_key)
+
+            # Get latest test run for this suite
+            result = await async_client.table('test_run_history').select(
+                'status'
+            ).eq('test_suite_id', str(suite_id)).order('created_at', desc=True).limit(1).execute()
+
+            if not result.data:
+                return None  # No test runs = no status
+
+            # Return status directly from latest run
+            return result.data[0].get('status', 'pending')
+
+        except Exception as e:
+            logger.error(f"Error getting suite status for {suite_id}: {e}")
+            return None
+
+    async def _get_test_case_statuses(self, suite_id: UUID) -> Dict[str, str]:
+        """
+        Get latest status for each test case from test_case_results.
+        Status values: pending, running, failed, completed
+        """
+        try:
+            from supabase.client import acreate_client
+            from static_memory_cache import StaticMemoryCache
+
+            db_config = StaticMemoryCache.get_database_config()
+            supabase_url = db_config.get("supabase_url")
+            supabase_key = db_config.get("supabase_key")
+
+            if not supabase_url or not supabase_key:
+                return {}
+
+            async_client = await acreate_client(supabase_url, supabase_key)
+
+            # Get all results for this suite ordered by created_at desc
+            results = await async_client.table('test_case_results').select(
+                'test_case_id, status'
+            ).eq('test_suite_id', str(suite_id)).order('created_at', desc=True).execute()
+
+            if not results.data:
+                return {}
+
+            # Get latest status for each test case (first occurrence due to desc order)
+            statuses = {}
+            for record in results.data:
+                tc_id = record.get('test_case_id')
+                if tc_id and tc_id not in statuses:
+                    statuses[tc_id] = record.get('status', 'pending')
+
+            return statuses
+
+        except Exception as e:
+            logger.error(f"Error getting test case statuses: {e}")
+            return {}

@@ -63,8 +63,46 @@ class TestCaseService(DatabaseService[TestCase]):
         return await self.update(case_id, update_data)
 
     async def delete_test_case(self, case_id: UUID) -> bool:
-        """Delete a test case."""
+        """Delete a test case (nullifies associated test case results first)."""
+        # Replace test_case_id with null in test case results (don't delete them)
+        updated_count = await self.nullify_test_case_references(case_id)
+        if updated_count > 0:
+            logger.info(f"Set test_case_id to null for {updated_count} test case results associated with test case {case_id}")
+
+        # Delete from local database
         return await self.delete(case_id)
+
+    async def nullify_test_case_references(self, test_case_id: UUID) -> int:
+        """Set test_case_id to null for all test case results associated with a test case ID."""
+        try:
+            from supabase.client import acreate_client
+            from static_memory_cache import StaticMemoryCache
+
+            # Get database config directly
+            db_config = StaticMemoryCache.get_database_config()
+            supabase_url = db_config.get("supabase_url")
+            supabase_key = db_config.get("supabase_key")
+
+            if not supabase_url or not supabase_key:
+                raise ValueError("Supabase URL and Key must be configured")
+
+            # Create raw Supabase client directly
+            async_client = await acreate_client(supabase_url, supabase_key)
+
+            # Update test_case_results to set test_case_id to null where it matches
+            result = await async_client.table('test_case_results').update(
+                {'test_case_id': None}
+            ).eq('test_case_id', str(test_case_id)).execute()
+
+            updated_count = len(result.data) if result.data else 0
+            if updated_count > 0:
+                logger.info(f"Nullified test_case_id references for {updated_count} test case results")
+
+            return updated_count
+
+        except Exception as e:
+            logger.error(f"Error nullifying test case references in test case results: {e}")
+            return 0
 
     async def reorder_test_cases(self, suite_id: UUID, case_orders: List[dict]) -> bool:
         """Reorder test cases within a suite."""
@@ -117,14 +155,13 @@ class TestCaseService(DatabaseService[TestCase]):
             if test_cases:
                 for case in test_cases:
                     try:
-                        # Delete each test case
-                        await supabase_client.delete(self.table_name, {'id': case['id']})
-                        deleted_count += 1
-                        logger.info(f"Deleted test case {case['id']} associated with test suite {suite_id}")
+                        # Use the proper delete_test_case method which handles foreign key constraints
+                        success = await self.delete_test_case(UUID(case['id']))
+                        if success:
+                            deleted_count += 1
                     except Exception as e:
                         logger.error(f"Failed to delete test case {case['id']}: {e}")
 
-            logger.info(f"Deleted {deleted_count} test cases associated with test suite {suite_id}")
             return deleted_count
 
         except Exception as e:

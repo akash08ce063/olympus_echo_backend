@@ -114,6 +114,8 @@ class UserAgent(UserAgentBase):
     id: UUID = Field(..., description="Unique user agent ID")
     created_at: datetime = Field(..., description="Creation timestamp")
     updated_at: datetime = Field(..., description="Last update timestamp")
+    evaluation_criteria: Optional[List[Dict[str, Any]]] = Field(None, description="Array of evaluation criteria")
+    agent_model_config: Optional[Dict[str, Any]] = Field(None, description="Model configuration for the agent")
 
 
 class TestCaseBase(BaseModel):
@@ -155,12 +157,13 @@ class TestCase(TestCaseBase):
     test_suite_id: UUID = Field(..., description="ID of the test suite this case belongs to")
     created_at: datetime = Field(..., description="Creation timestamp")
     updated_at: datetime = Field(..., description="Last update timestamp")
+    status: Optional[str] = Field(None, description="Current status of the test case (running, completed, failed, pending)")
 
 
 class TestRunHistoryBase(BaseModel):
     """Base model for test run history."""
 
-    test_suite_id: UUID = Field(..., description="ID of the test suite that was run")
+    test_suite_id: Optional[UUID] = Field(None, description="ID of the test suite that was run (can be null if suite was deleted)")
     user_id: UUID = Field(..., description="User ID who ran the test")
     status: str = Field(
         "running",
@@ -224,7 +227,7 @@ class TestSuiteWithRelations(TestSuite):
     target_agent: Optional[TargetAgent] = Field(None, description="Target agent details")
     user_agent: Optional[UserAgent] = Field(None, description="User agent details")
     test_cases: List[TestCase] = Field(default_factory=list, description="Test cases in this suite")
-    test_case_status: Dict[str, str] = Field(default_factory=dict, description="Status of each test case by ID")
+    suite_status: Optional[str] = Field(None, description="Overall suite status from latest test run")
 
 
 class TestRunWithResults(TestRunHistory):

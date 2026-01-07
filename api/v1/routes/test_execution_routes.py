@@ -69,32 +69,31 @@ async def run_test_suite(
     Returns:
         Test execution response with run ID
     """
+    test_suite_service = None
+    test_case_service = None
+    active_cases = []
+
     try:
         # Validate that the test suite exists and user has access
         test_suite_service = TestSuiteService()
-        try:
-            test_suite = await test_suite_service.get_test_suite(suite_id)
-            if not test_suite:
-                raise HTTPException(status_code=404, detail=f"Test suite '{suite_id}' not found")
+        test_suite = await test_suite_service.get_test_suite(suite_id)
+        if not test_suite:
+            raise HTTPException(status_code=404, detail=f"Test suite '{suite_id}' not found")
 
-            if test_suite.user_id != user_id:
-                raise HTTPException(
-                    status_code=403,
-                    detail="You don't have permission to run tests for this test suite"
-                )
+        if test_suite.user_id != user_id:
+            raise HTTPException(
+                status_code=403,
+                detail="You don't have permission to run tests for this test suite"
+            )
 
-            # Check if there are active test cases
-            test_case_service = TestCaseService()
-            active_cases = await test_case_service.get_test_cases_by_suite(suite_id, include_inactive=False)
-            if not active_cases:
-                raise HTTPException(
-                    status_code=400,
-                    detail="No active test cases found in this test suite"
-                )
-
-        finally:
-            await test_suite_service.close()
-            await test_case_service.close()
+        # Check if there are active test cases
+        test_case_service = TestCaseService()
+        active_cases = await test_case_service.get_test_cases_by_suite(suite_id, include_inactive=False)
+        if not active_cases:
+            raise HTTPException(
+                status_code=400,
+                detail="No active test cases found in this test suite"
+            )
 
         # Get the request ID from header
         request_id = request_obj.headers.get("x-pranthora-callid")
@@ -130,6 +129,11 @@ async def run_test_suite(
     except Exception as e:
         logger.error(f"Error starting test suite execution: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to start test execution: {str(e)}")
+    finally:
+        if test_suite_service:
+            await test_suite_service.close()
+        if test_case_service:
+            await test_case_service.close()
 
 
 @router.post("/run-case/{case_id}", response_model=TestExecutionResponse)
@@ -429,3 +433,112 @@ async def get_call_logs_by_request_id(
     except Exception as e:
         logger.error(f"Error getting call logs: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get call logs: {str(e)}")
+
+
+@router.get("/recording/{result_id}")
+async def get_recording_url(
+    result_id: UUID,
+    user_id: UUID = Query(..., description="User ID for authorization"),
+):
+    """
+    Get a signed URL for the recording file of a test case result.
+
+    Args:
+        result_id: Test case result ID
+        user_id: User ID for authorization
+
+    Returns:
+        Signed URL to download/play the recording
+    """
+    try:
+        from services.test_history_service import TestCaseResultService, TestRunHistoryService
+        from services.recording_storage_service import RecordingStorageService
+
+        result_service = TestCaseResultService()
+        run_service = TestRunHistoryService()
+        recording_service = RecordingStorageService()
+
+        try:
+            # Get the test case result
+            result = await result_service.get_by_id(result_id)
+            if not result:
+                raise HTTPException(status_code=404, detail=f"Test case result '{result_id}' not found")
+
+            # Verify user access via test run
+            test_run = await run_service.get_test_run(result.get('test_run_id'))
+            if not test_run or test_run.user_id != user_id:
+                raise HTTPException(status_code=403, detail="You don't have permission to access this recording")
+
+            # Get recording URL directly from database (now stored as JSON)
+            recording_file_url = result.get('recording_file_url')
+
+            if not recording_file_url:
+                raise HTTPException(status_code=404, detail="No recording file found for this test result")
+
+            return {
+                "result_id": str(result_id),
+                "test_case_id": str(result.get('test_case_id')),
+                "recording_url": recording_file_url,
+                "expires_in": 3600
+            }
+
+        finally:
+            await result_service.close()
+            await run_service.close()
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting recording URL: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get recording URL: {str(e)}")
+
+
+@router.get("/recordings/suite/{suite_id}")
+async def get_recordings_by_suite(
+    suite_id: UUID,
+    user_id: UUID = Query(..., description="User ID for authorization"),
+):
+    """Get all recording URLs for a test suite."""
+    try:
+        from services.test_suite_service import TestSuiteService
+        from services.recording_storage_service import RecordingStorageService
+        from supabase.client import acreate_client
+        from static_memory_cache import StaticMemoryCache
+
+        suite_service = TestSuiteService()
+        recording_service = RecordingStorageService()
+
+        try:
+            # Verify suite exists and user owns it
+            suite = await suite_service.get_test_suite(suite_id)
+            if not suite:
+                raise HTTPException(status_code=404, detail="Suite not found")
+         
+            # Get all results for this suite directly
+            db_config = StaticMemoryCache.get_database_config()
+            client = await acreate_client(db_config["supabase_url"], db_config["supabase_key"])
+            
+            results = await client.table('test_case_results').select(
+                'id, test_case_id, recording_file_url, status'
+            ).eq('test_suite_id', str(suite_id)).order('created_at', desc=True).execute()
+
+            recordings = []
+            for r in results.data or []:
+                if r.get('recording_file_url'):
+                    recordings.append({
+                        "result_id": r['id'],
+                        "test_case_id": r['test_case_id'],
+                        "recording_url": r['recording_file_url'],
+                        "status": r['status']
+                    })
+
+            return {"suite_id": str(suite_id), "recordings": recordings}
+
+        finally:
+            await suite_service.close()
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

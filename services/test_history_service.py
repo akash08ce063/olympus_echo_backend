@@ -59,7 +59,9 @@ class TestRunHistoryService(DatabaseService[TestRunHistory]):
     ) -> List[TestRunHistory]:
         """Get test runs for a user."""
         results = await self.get_all_by_user(user_id, limit, offset)
-        return [TestRunHistory(**result) for result in results]
+        # Filter out records with null test_suite_id to avoid validation errors
+        filtered_results = [result for result in results if result.get('test_suite_id') is not None]
+        return [TestRunHistory(**result) for result in filtered_results]
 
     async def get_test_run_with_results(self, run_id: UUID) -> Optional[TestRunWithResults]:
         """Get a test run with all its results."""
@@ -214,29 +216,8 @@ class TestCaseResultService(DatabaseService[TestCaseResult]):
                     logger.warning(f"Could not store wav_file_ids, falling back to legacy: {e}")
                     concurrent_supported = False
 
-            if not concurrent_supported or not (wav_file_ids and len(wav_file_ids) > 0):
-                # For single calls, upload combined recording (legacy behavior)
-                wav_buffer = io.BytesIO()
-                with wave.open(wav_buffer, 'wb') as wav_file:
-                    wav_file.setnchannels(num_channels)  # Stereo for combined agent audio
-                    wav_file.setsampwidth(2)  # 16-bit
-                    wav_file.setframerate(sample_rate)
-                    wav_file.writeframes(pcm_frames)
-
-                wav_data = wav_buffer.getvalue()
-
-                # Upload recording file to Supabase storage
-                recording_file_id = await self.recording_service.upload_recording_file(
-                    file_content=wav_data,
-                    file_name=f"test_case_{test_case_id}.wav",
-                    content_type="audio/wav"
-                )
-
-                if recording_file_id:
-                    result_data["recording_file_id"] = str(recording_file_id)
-                    logger.info(f"Uploaded combined recording: {recording_file_id}")
-                else:
-                    logger.warning(f"Failed to upload recording for test case {test_case_id}")
+            # Recording files are now uploaded at the test suite level in test_execution_service.py
+            # No need to upload individual test case recordings here
 
             result_id = await self.create(result_data)
             logger.info(f"Created test case result: {result_id} with {concurrent_calls} concurrent call(s)")
@@ -245,6 +226,76 @@ class TestCaseResultService(DatabaseService[TestCaseResult]):
         except Exception as e:
             logger.error(f"Error creating test case result with recording: {e}")
             raise
+
+    async def get_result_by_test_run_and_case(self, test_run_id: UUID, test_case_id: UUID) -> Optional[TestCaseResult]:
+        """
+        Get a test case result by test run ID and test case ID.
+
+        Args:
+            test_run_id: ID of the test run
+            test_case_id: ID of the test case
+
+        Returns:
+            TestCaseResult if found, None otherwise
+        """
+        try:
+            supabase_client = await self._get_client()
+
+            results = await supabase_client.select(
+                "test_case_results",
+                filters={
+                    "test_run_id": str(test_run_id),
+                    "test_case_id": str(test_case_id)
+                },
+                limit=1
+            )
+
+            if results and len(results) > 0:
+                return TestCaseResult(**results[0])
+            return None
+
+        except Exception as e:
+            logger.error(f"Error fetching test case result for run {test_run_id} and case {test_case_id}: {e}")
+            return None
+
+    async def update_test_case_result_status(
+        self,
+        result_id: UUID,
+        status: str,
+        conversation_logs: Optional[List[Dict[str, Any]]] = None,
+        error_message: Optional[str] = None
+    ) -> bool:
+        """
+        Update the status and related fields of an existing test case result.
+
+        Args:
+            result_id: ID of the test case result to update
+            status: New status ('running', 'completed', 'failed')
+            conversation_logs: Updated conversation logs (optional)
+            error_message: Error message if status is 'failed' (optional)
+
+        Returns:
+            True if update was successful, False otherwise
+        """
+        try:
+            update_data = {"status": status}
+
+            if conversation_logs is not None:
+                update_data["conversation_logs"] = conversation_logs
+
+            if error_message is not None:
+                update_data["error_message"] = error_message
+
+            success = await self.update(result_id, update_data)
+            if success:
+                logger.info(f"Updated test case result {result_id} status to {status}")
+            else:
+                logger.error(f"Failed to update test case result {result_id} status to {status}")
+            return success
+
+        except Exception as e:
+            logger.error(f"Error updating test case result {result_id}: {e}")
+            return False
 
 
 class TestAlertService(DatabaseService[TestAlert]):

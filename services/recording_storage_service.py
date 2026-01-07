@@ -172,18 +172,47 @@ class RecordingStorageService:
             return None
 
     async def _create_signed_url(self, file_path: str, expires_in: int) -> Optional[str]:
-        """
-        Create a signed URL for file access.
-        This is a placeholder - actual implementation depends on Supabase client capabilities.
-        """
+        """Create a signed URL for file access."""
         try:
             supabase_client = await get_supabase_client()
-            # This would typically use supabase_client.storage.from_(bucket).create_signed_url()
-            # For now, return a placeholder - this needs to be implemented based on actual Supabase client methods
-            logger.warning("Signed URL creation not implemented - needs Supabase client update")
-            return None
+            return await supabase_client.create_signed_url(self.bucket_name, file_path, expires_in)
         except Exception as e:
             logger.error(f"Error creating signed URL: {e}")
+            return None
+
+    async def get_recording_url_by_file_id(self, file_id: str, test_case_id: str, call_number: int = 1) -> Optional[str]:
+        """
+        Get a signed URL for a recording file using file_id and test_case_id.
+        Uses the correct format: {file_id}_test_case_{test_case_id}_call_recording.wav
+
+        Args:
+            file_id: UUID of the recording file
+            test_case_id: UUID of the test case
+            call_number: Call number (ignored, always uses call_1)
+
+        Returns:
+            Signed URL if successful, None otherwise
+        """
+        supabase_client = await get_supabase_client()
+
+        # Only use the new correct format
+        file_name = f"test_case_{test_case_id}_call_recording.wav"
+
+        # Construct the file path
+        file_path = f"{file_id}_{file_name}"
+
+        try:
+            signed_url = await supabase_client.create_signed_url(self.bucket_name, file_path, 3600)
+
+            if signed_url:
+                logger.info(f"Generated signed URL for recording: {file_path}")
+                return signed_url
+            else:
+                logger.warning(f"Failed to generate signed URL for: {file_path}")
+                return None
+
+        except Exception as e:
+            logger.warning(f"Recording file not found: {file_path}")
             return None
 
     def get_file_info(self, file_id: UUID, file_name: str) -> Dict[str, Any]:

@@ -163,8 +163,11 @@ class TestExecutionService:
             "started_at": datetime.utcnow().isoformat(),
         }
 
-        # If request_id is provided, use it as the primary key
-        if request_id:
+        # If request_id is provided and it's a valid UUID, use it as the primary key
+        import re
+        uuid_pattern = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE)
+
+        if request_id and uuid_pattern.match(request_id):
             run_data["id"] = request_id
             # Use create_with_id instead of create to specify the ID
             run_id = await self.database_service.create_with_id(run_data)
@@ -193,23 +196,24 @@ class TestExecutionService:
                     result = await self._execute_test_case(test_case, test_run_id, concurrent_calls)
                     results.append(result)
 
-                    if result["status"] == "pass":
+                    # Status values: completed, failed
+                    if result["status"] == "completed":
                         passed_count += 1
-                    elif result["status"] == "fail":
+                    elif result["status"] == "failed":
                         failed_count += 1
-                    elif result["status"] == "alert":
-                        alert_count += 1
 
                 except Exception as e:
                     logger.error(f"Error executing test case {test_case.id}: {e}")
                     failed_count += 1
 
             # Update test run with final results
+            # Set status to "failed" if any test failed, otherwise "completed"
+            final_status = "failed" if failed_count > 0 else "completed"
             await self._update_test_run_status(
-                test_run_id, "completed", passed_count, failed_count, alert_count
+                test_run_id, final_status, passed_count, failed_count, alert_count
             )
 
-            logger.info(f"Completed test run {test_run_id}: {passed_count} passed, {failed_count} failed, {alert_count} alerts")
+            logger.info(f"Completed test run {test_run_id}: status={final_status}, {passed_count} passed, {failed_count} failed, {alert_count} alerts")
 
         except Exception as e:
             logger.error(f"Error in test case execution: {e}")
@@ -225,19 +229,22 @@ class TestExecutionService:
         try:
             result = await self._execute_test_case(test_case, test_run_id, concurrent_calls)
 
-            passed_count = 1 if result["status"] == "pass" else 0
-            failed_count = 1 if result["status"] == "fail" else 0
-            alert_count = 1 if result["status"] == "alert" else 0
+            # Status values: completed, failed
+            passed_count = 1 if result["status"] == "completed" else 0
+            failed_count = 1 if result["status"] == "failed" else 0
+            alert_count = 0
 
+            # For single test case execution, update test run status based on result
+            test_run_status = "failed" if result["status"] == "failed" else "completed"
             await self._update_test_run_status(
-                test_run_id, "completed", passed_count, failed_count, alert_count
+                test_run_id, test_run_status, passed_count, failed_count, alert_count
             )
 
-            logger.info(f"Completed single test case execution {test_run_id}: {result['status']}")
+            logger.info(f"Completed single test case execution {test_run_id}: {result['status']}, run status: {test_run_status}")
 
         except Exception as e:
             logger.error(f"Error in single test case execution: {e}")
-            await self._update_test_run_status(test_run_id, "failed", 0, 1, 0)
+            # Don't update test run status on error either - let external processes handle completion
 
     async def _execute_test_case(
         self,
@@ -268,7 +275,7 @@ class TestExecutionService:
                 # For development/testing, allow execution without target agent but fail gracefully
                 return {
                     "result_id": None,
-                    "status": "fail",
+                    "status": "failed",
                     "error": f"Target agent not found for test suite {test_case.test_suite_id}"
                 }
 
@@ -277,66 +284,117 @@ class TestExecutionService:
                 # For development/testing, allow execution without user agent but fail gracefully
                 return {
                     "result_id": None,
-                    "status": "fail",
+                    "status": "failed",
                     "error": f"User agent not found for test suite {test_case.test_suite_id}"
                 }
+
+            # Create initial test case result with running status
+            # Recording URL will be added when test completes
+            initial_result_data = {
+                "test_run_id": str(test_run_id),
+                "test_case_id": str(test_case.id),
+                "test_suite_id": str(test_case.test_suite_id),
+                "status": "running",
+                "conversation_logs": [],
+                "evaluation_result": None,
+                "error_message": None
+            }
+            initial_result_id = await self.test_result_service.create(initial_result_data)
+            logger.info(f"Created test case result {initial_result_id} with initial running status for test case {test_case.id}")
 
             # Simulate conversation using goals/prompts
             conversation_result = await self._simulate_conversation(
                 test_case, target_agent, user_agent, concurrent_calls or test_case.default_concurrent_calls, test_run_id
             )
 
-            # Evaluate results based on evaluation criteria
-            evaluation_result = await self._evaluate_test_results(
-                test_case, conversation_result, user_agent
-            )
+            # Determine status based on conversation result
+            if conversation_result.get("success", False):
+                # WebSocket connections successful - conversation completed
+                if conversation_result.get("error_message") and "timeout" in conversation_result.get("error_message", "").lower():
+                    # Conversation timeout - completed
+                    status = "completed"
+                    logger.info(f"Conversation completed with timeout for test case {test_case.id}")
+                else:
+                    # Conversation completed successfully
+                    status = "completed"
+                    logger.info(f"Conversation completed successfully for test case {test_case.id}")
+            else:
+                # Other errors - failed
+                status = "failed"
+                logger.error(f"Conversation failed for test case {test_case.id}: {conversation_result.get('error_message', 'Unknown error')}")
 
-            # Determine final status
-            status = self._determine_test_status(evaluation_result)
+            # Check if test case result already exists for this test run and test case
+            existing_result = await self.test_result_service.get_result_by_test_run_and_case(test_run_id, test_case.id)
 
-            # Store test case result
-            result_id = await self.test_result_service.create_test_case_result_with_recording(
-                test_run_id=test_run_id,
-                test_case_id=test_case.id,
-                test_suite_id=test_case.test_suite_id,
-                status=status,
-                conversation_logs=conversation_result.get("conversation_logs", []),
-                evaluation_result=evaluation_result,
-                error_message=conversation_result.get("error_message"),
-                pcm_frames=conversation_result.get("audio_data", b""),
-                sample_rate=8000,  # Both agents use 8kHz mulaw
-                num_channels=1,  # Mono - combined audio from both agents
-                concurrent_calls=conversation_result.get("concurrent_calls", 1),
-                wav_file_ids=conversation_result.get("wav_file_ids", [])
-            )
+            if existing_result:
+                # Update existing test case result with final status and recording URL
+                update_data = {
+                    "status": status,
+                    "conversation_logs": conversation_result.get("conversation_logs", []),
+                    "error_message": conversation_result.get("error_message")
+                }
+
+                # Add recording URL if available (from combined recording at suite level)
+                if conversation_result.get("recording_file_url"):
+                    update_data["recording_file_url"] = conversation_result["recording_file_url"]
+
+                success = await self.test_result_service.update(existing_result.id, update_data)
+                result_id = existing_result.id
+                logger.info(f"Updated existing test case result {result_id} with status {status}")
+            else:
+                # Create new test case result (fallback)
+                result_data = {
+                    "test_run_id": str(test_run_id),
+                    "test_case_id": str(test_case.id),
+                    "test_suite_id": str(test_case.test_suite_id),
+                    "status": status,
+                    "conversation_logs": conversation_result.get("conversation_logs", []),
+                    "evaluation_result": None,
+                    "error_message": conversation_result.get("error_message")
+                }
+
+                # Add recording URL if available
+                if conversation_result.get("recording_file_url"):
+                    result_data["recording_file_url"] = conversation_result["recording_file_url"]
+
+                result_id = await self.test_result_service.create(result_data)
+                logger.info(f"Created new test case result {result_id} with status {status}")
 
             return {
                 "result_id": result_id,
                 "status": status,
-                "conversation_result": conversation_result,
-                "evaluation_result": evaluation_result
+                "conversation_result": conversation_result
             }
 
         except Exception as e:
             logger.error(f"Error executing test case {test_case.id}: {e}")
-            # Store failed result
+            # Update or create failed result
             try:
-                result_id = await self.test_result_service.create_test_case_result_with_recording(
-                    test_run_id=test_run_id,
-                    test_case_id=test_case.id,
-                    test_suite_id=test_case.test_suite_id,
-                    status="fail",
-                    error_message=str(e),
-                    pcm_frames=b"",
-                    sample_rate=8000,  # Use 8kHz for consistency
-                    num_channels=1,  # Mono format
-                    concurrent_calls=1,
-                    wav_file_ids=[]
-                )
-                return {"result_id": result_id, "status": "fail", "error": str(e)}
+                # Check if test case result already exists
+                existing_result = await self.test_result_service.get_result_by_test_run_and_case(test_run_id, test_case.id)
+
+                if existing_result:
+                    # Update existing result to failed
+                    await self.test_result_service.update(
+                        existing_result.id,
+                        {"status": "failed", "error_message": str(e)}
+                    )
+                    result_id = existing_result.id
+                else:
+                    # Create new failed result
+                    result_data = {
+                        "test_run_id": str(test_run_id),
+                        "test_case_id": str(test_case.id),
+                        "test_suite_id": str(test_case.test_suite_id),
+                        "status": "failed",
+                        "error_message": str(e)
+                    }
+                    result_id = await self.test_result_service.create(result_data)
+
+                return {"result_id": result_id, "status": "failed", "error": str(e)}
             except Exception as store_error:
                 logger.error(f"Error storing failed test result: {store_error}")
-                return {"status": "fail", "error": str(e)}
+                return {"status": "failed", "error": str(e)}
 
     async def _simulate_conversation(
         self,
@@ -385,12 +443,13 @@ class TestExecutionService:
             all_conversation_logs = []
             all_audio_data = bytearray()
             total_duration = 0
-            wav_file_ids = []
             successful_calls = 0
+            failed_calls = 0
 
             for i, result in enumerate(conversation_results):
                 if isinstance(result, Exception):
                     logger.error(f"Conversation {i+1} failed: {result}")
+                    failed_calls += 1
                     continue
 
                 if result.get("success"):
@@ -398,15 +457,57 @@ class TestExecutionService:
                     all_conversation_logs.extend(result.get("conversation_logs", []))
                     all_audio_data.extend(result.get("audio_data", b""))
                     total_duration = max(total_duration, result.get("duration_seconds", 0))
-
-                    if result.get("wav_file_id"):
-                        wav_file_ids.append(result["wav_file_id"])
+                else:
+                    failed_calls += 1
+                    logger.error(f"Conversation {i+1} failed: {result.get('error_message', 'Unknown error')}")
 
             duration_seconds = time.time() - start_time
 
+            # Create combined WAV file from all conversations
+            recording_file_url = None
+            if all_audio_data:
+                try:
+                    # Convert combined μ-law audio to PCM
+                    combined_pcm = audioop.ulaw2lin(bytes(all_audio_data), 2)  # 16-bit PCM
+
+                    # Create WAV file data in memory
+                    wav_buffer = io.BytesIO()
+                    with wave.open(wav_buffer, 'wb') as wf:
+                        wf.setnchannels(1)      # Mono
+                        wf.setsampwidth(2)      # 16-bit PCM
+                        wf.setframerate(self.sample_rate)
+                        wf.writeframes(combined_pcm)
+
+                    wav_data = wav_buffer.getvalue()
+                    wav_filename = f"test_case_{test_case.id}_call_1_recording.wav"
+
+                    # Upload combined WAV file to Supabase
+                    wav_file_id = await self.recording_service.upload_recording_file(
+                        file_content=wav_data,
+                        file_name=wav_filename,
+                        content_type="audio/wav"
+                    )
+
+                    if wav_file_id:
+                        # Generate signed URL immediately after upload
+                        from data_layer.supabase_client import get_supabase_client
+                        supabase_client = await get_supabase_client()
+                        file_path = f"{wav_file_id}_{wav_filename}"
+                        recording_file_url = await supabase_client.create_signed_url("recording_files", file_path, 3600)
+
+                        if recording_file_url:
+                            logger.info(f"📤 Combined WAV file uploaded and URL generated: {file_path}")
+                        else:
+                            logger.error("Failed to generate signed URL for combined WAV file")
+                    else:
+                        logger.error("Failed to upload combined WAV file")
+
+                except Exception as e:
+                    logger.error(f"Failed to create/upload combined WAV file: {e}")
+
             logger.info(
                 f"All conversations completed: {successful_calls}/{concurrent_calls} successful, "
-                f"{len(all_conversation_logs)} total turns, "
+                f"{failed_calls} failed, {len(all_conversation_logs)} total turns, "
                 f"{len(all_audio_data)} bytes combined audio, {duration_seconds:.2f}s total duration"
             )
 
@@ -418,8 +519,10 @@ class TestExecutionService:
                 "duration_seconds": duration_seconds,
                 "concurrent_calls": concurrent_calls,
                 "successful_calls": successful_calls,
-                "wav_file_ids": wav_file_ids,
-                "success": successful_calls > 0
+                "failed_calls": failed_calls,
+                "recording_file_url": recording_file_url,  # Signed URL for the combined recording
+                "success": successful_calls > 0,
+                "error_message": f"{failed_calls} out of {concurrent_calls} calls failed" if failed_calls > 0 else None
             }
 
         except Exception as e:
@@ -553,11 +656,24 @@ class TestExecutionService:
 
             # Wait for conversation to complete or timeout
             timeout_seconds = test_case.timeout_seconds or 300
+            connection_failed = False
+            error_message = None
+
             try:
-                await asyncio.wait_for(
+                results = await asyncio.wait_for(
                     asyncio.gather(target_task, user_task, return_exceptions=True),
                     timeout=timeout_seconds
                 )
+
+                # Check if any of the tasks failed
+                for i, result in enumerate(results):
+                    if isinstance(result, Exception):
+                        connection_failed = True
+                        task_name = "target" if i == 0 else "user"
+                        error_message = f"{task_name} agent connection failed: {result}"
+                        logger.error(f"[Call {call_number}] {error_message}")
+                        break
+
             except asyncio.TimeoutError:
                 logger.info(f"[Call {call_number}] Conversation timeout reached ({timeout_seconds}s)")
                 conversation_logs.append({
@@ -567,6 +683,9 @@ class TestExecutionService:
                     "content": f"Conversation timeout reached after {timeout_seconds} seconds",
                     "timestamp": datetime.utcnow().isoformat()
                 })
+                # Timeout means conversation completed (just took too long), not failed
+                # Set error_message to indicate timeout but continue with normal processing
+                error_message = f"Conversation timeout after {timeout_seconds} seconds"
             finally:
                 # Stop connections
                 stop_event.set()
@@ -574,38 +693,21 @@ class TestExecutionService:
                 user_task.cancel()
                 await asyncio.gather(target_task, user_task, return_exceptions=True)
 
+            # If connection failed, return failure immediately
+            if connection_failed:
+                return {
+                    "conversation_logs": conversation_logs,
+                    "audio_data": b"",
+                    "combined_audio_bytes": 0,
+                    "error_message": error_message,
+                    "success": False
+                }
+
             conv_duration = time.time() - conv_start_time
             audio_data = bytes(combined_audio_data)
 
-            # Upload WAV file for this conversation
-            wav_filename = f"test_case_{test_case.id}_call_{call_number}_recording.wav"
-            wav_file_id = None
-
-            try:
-                # Create WAV file data in memory using this call's isolated buffer
-                wav_buffer = io.BytesIO()
-                with wave.open(wav_buffer, 'wb') as wf:
-                    wf.setnchannels(1)      # Mono
-                    wf.setsampwidth(2)      # 16-bit PCM
-                    wf.setframerate(self.sample_rate)
-                    wf.writeframes(isolated_pcm_frames)  # Use isolated buffer
-
-                wav_data = wav_buffer.getvalue()
-
-                # Upload WAV file to Supabase
-                wav_file_id = await self.recording_service.upload_recording_file(
-                    file_content=wav_data,
-                    file_name=wav_filename,
-                    content_type="audio/wav"
-                )
-
-                if wav_file_id:
-                    logger.info(f"[Call {call_number}] 📤 Isolated WAV file uploaded: {wav_file_id} ({len(isolated_pcm_frames)} PCM bytes)")
-                else:
-                    logger.error(f"[Call {call_number}] Failed to upload isolated WAV file")
-
-            except Exception as e:
-                logger.error(f"[Call {call_number}] Failed to upload isolated WAV file: {e}")
+            # Don't create individual WAV files - only combined file will be created
+            # in the parent _simulate_conversation function
 
             logger.info(
                 f"[Call {call_number}] Isolated conversation completed: {len(conversation_logs)} turns, "
@@ -619,7 +721,7 @@ class TestExecutionService:
                 "audio_format": "mulaw 8kHz",
                 "duration_seconds": conv_duration,
                 "call_number": call_number,
-                "wav_file_id": str(wav_file_id) if wav_file_id else None,
+                "error_message": error_message if 'error_message' in locals() else None,
                 "success": True
             }
 
