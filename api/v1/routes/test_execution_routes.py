@@ -397,7 +397,7 @@ async def get_call_logs_by_request_id(
                 response = await pranthora_client.client.get(
                     f"{pranthora_client.base_url}/api/v1/call-analytics/call-logs/{request_id}",
                     headers={
-                        "Authorization": f"Bearer {pranthora_client.api_key}",
+                        "x-api-key": pranthora_client.api_key,
                         "Content-Type": "application/json"
                     }
                 )
@@ -519,7 +519,7 @@ async def get_recordings_by_suite(
             client = await acreate_client(db_config["supabase_url"], db_config["supabase_key"])
             
             results = await client.table('test_case_results').select(
-                'id, test_case_id, recording_file_url, status'
+                'id, test_case_id, recording_file_url, status, test_run_id'
             ).eq('test_suite_id', str(suite_id)).order('created_at', desc=True).execute()
 
             recordings = []
@@ -529,7 +529,8 @@ async def get_recordings_by_suite(
                         "result_id": r['id'],
                         "test_case_id": r['test_case_id'],
                         "recording_url": r['recording_file_url'],
-                        "status": r['status']
+                        "status": r['status'],
+                        "run_id": r.get('test_run_id')
                     })
 
             return {"suite_id": str(suite_id), "recordings": recordings}

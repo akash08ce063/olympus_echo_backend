@@ -50,7 +50,7 @@ class PranthoraApiClient:
         self.base_url = StaticMemoryCache.get_pranthora_base_url()
         self.client = httpx.AsyncClient(
             headers={
-                "Authorization": f"Bearer {self.api_key}",
+                "x-api-key": self.api_key,
                 "Content-Type": "application/json"
             },
             timeout=30.0
