@@ -510,7 +510,6 @@ async def get_recording_url(
                     "test_case_id": str(test_case_id),
                     "concurrent_calls": concurrent_calls,
                     "recordings": recording_urls,
-                    "recording_url": recording_urls[0]["recording_url"] if recording_urls else None,  # Backward compat
                     "expires_in": 3600
                 }
 
