@@ -16,6 +16,7 @@ import io
 from typing import List, Optional, Dict, Any
 from uuid import UUID, uuid4
 from datetime import datetime
+from pydantic import BaseModel, Field
 
 import websockets
 from websockets.exceptions import ConnectionClosed, ConnectionClosedOK, ConnectionClosedError
@@ -28,11 +29,29 @@ from services.user_agent_service import UserAgentService
 from services.test_history_service import TestRunHistoryService, TestCaseResultService
 from services.recording_storage_service import RecordingStorageService
 from services.pranthora_api_client import PranthoraApiClient
+from services.evaluation_agent_service import EvaluationAgentService
 from models.test_suite_models import (
     TestSuite, TestCase, TestRunHistory, TestCaseResult,
     TestRunHistoryBase, TestCaseResultBase
 )
 from telemetrics.logger import logger
+
+
+class TranscriptMessage(BaseModel):
+    """Pydantic model for transcript message."""
+    role: str = Field(..., description="Message role: user or assistant")
+    content: str = Field(..., description="Message content")
+    timestamp: Optional[str] = Field(None, description="Message timestamp")
+
+
+class EvaluationRequest(BaseModel):
+    """Pydantic model for evaluation request."""
+    test_case_id: UUID
+    test_run_id: UUID
+    request_ids: List[str] = Field(..., description="Request IDs to fetch transcripts")
+    goals: List[Dict[str, Any]] = Field(default_factory=list)
+    evaluation_criteria: List[Dict[str, Any]] = Field(default_factory=list)
+    test_case_name: str = "Test Case"
 
 
 class TestExecutionService:
@@ -48,6 +67,7 @@ class TestExecutionService:
         self.test_result_service = TestCaseResultService()
         self.recording_service = RecordingStorageService()
         self.pranthora_client = PranthoraApiClient()
+        self.evaluation_service = EvaluationAgentService()
 
         # Recording setup
         self.sample_rate = 8000  # μ-law sample rate
@@ -59,7 +79,8 @@ class TestExecutionService:
         test_suite_id: UUID,
         user_id: UUID,
         concurrent_calls: Optional[int] = None,
-        request_id: Optional[str] = None
+        request_id: Optional[str] = None,
+        execution_mode: str = "sequential"
     ) -> UUID:
         """
         Run all active test cases in a test suite.
@@ -95,7 +116,7 @@ class TestExecutionService:
 
             # Execute test cases asynchronously
             asyncio.create_task(
-                self._execute_test_cases_async(test_run_id, test_cases, concurrent_calls)
+                self._execute_test_cases_async(test_run_id, test_cases, concurrent_calls, execution_mode)
             )
 
             logger.info(f"Started test suite execution: {test_run_id} with {len(test_cases)} test cases")
@@ -181,7 +202,8 @@ class TestExecutionService:
         self,
         test_run_id: UUID,
         test_cases: List[TestCase],
-        concurrent_calls: Optional[int] = None
+        concurrent_calls: Optional[int] = None,
+        execution_mode: str = "sequential"
     ):
         """Execute multiple test cases asynchronously."""
         try:
@@ -190,21 +212,43 @@ class TestExecutionService:
             failed_count = 0
             alert_count = 0
 
-            # Execute test cases sequentially for now (can be made concurrent later)
-            for test_case in test_cases:
-                try:
-                    result = await self._execute_test_case(test_case, test_run_id, concurrent_calls)
-                    results.append(result)
-
-                    # Status values: completed, failed
-                    if result["status"] == "completed":
-                        passed_count += 1
-                    elif result["status"] == "failed":
+            if execution_mode == "parallel":
+                # Execute all test cases in parallel
+                logger.info(f"Executing {len(test_cases)} test cases in parallel mode")
+                tasks = [
+                    self._execute_test_case(test_case, test_run_id, concurrent_calls)
+                    for test_case in test_cases
+                ]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                # Process results
+                for i, result in enumerate(results):
+                    if isinstance(result, Exception):
+                        logger.error(f"Error executing test case {test_cases[i].id}: {result}")
                         failed_count += 1
+                    else:
+                        # Status values: completed, failed
+                        if result.get("status") == "completed":
+                            passed_count += 1
+                        elif result.get("status") == "failed":
+                            failed_count += 1
+            else:
+                # Execute test cases sequentially (default)
+                logger.info(f"Executing {len(test_cases)} test cases in sequential mode")
+                for test_case in test_cases:
+                    try:
+                        result = await self._execute_test_case(test_case, test_run_id, concurrent_calls)
+                        results.append(result)
 
-                except Exception as e:
-                    logger.error(f"Error executing test case {test_case.id}: {e}")
-                    failed_count += 1
+                        # Status values: completed, failed
+                        if result["status"] == "completed":
+                            passed_count += 1
+                        elif result["status"] == "failed":
+                            failed_count += 1
+
+                    except Exception as e:
+                        logger.error(f"Error executing test case {test_case.id}: {e}")
+                        failed_count += 1
 
             # Update test run with final results
             # Set status to "failed" if any test failed, otherwise "completed"
@@ -213,7 +257,7 @@ class TestExecutionService:
                 test_run_id, final_status, passed_count, failed_count, alert_count
             )
 
-            logger.info(f"Completed test run {test_run_id}: status={final_status}, {passed_count} passed, {failed_count} failed, {alert_count} alerts")
+            logger.info(f"Completed test run {test_run_id}: status={final_status}, {passed_count} passed, {failed_count} failed, {alert_count} alerts (mode: {execution_mode})")
 
         except Exception as e:
             logger.error(f"Error in test case execution: {e}")
@@ -288,9 +332,23 @@ class TestExecutionService:
                     "error": f"User agent not found for test suite {test_case.test_suite_id}"
                 }
 
-            # Create initial test case result with running status
-            # Recording URL will be added when test completes
+            # Generate request_id early so we can use it as test_case_result.id
+            # When running a test suite, use each test case's default_concurrent_calls
+            # The concurrent_calls parameter from suite level should be ignored in favor of test case defaults
+            # Only use provided concurrent_calls if test case doesn't have a default_concurrent_calls set
+            if test_case.default_concurrent_calls and test_case.default_concurrent_calls > 0:
+                # Test case has its own default - use it (this is the normal case for test suite execution)
+                calls_to_use = test_case.default_concurrent_calls
+            else:
+                # Test case doesn't have a default, use provided concurrent_calls or fallback to 1
+                calls_to_use = concurrent_calls if concurrent_calls and concurrent_calls > 0 else 1
+            
+            # Generate primary request_id for the first call (will be used as test_case_result.id)
+            primary_request_id = str(uuid4())
+            
+            # Create initial test case result with "running" status, using request_id as the ID
             initial_result_data = {
+                "id": primary_request_id,  # Use request_id as the test_case_result.id
                 "test_run_id": str(test_run_id),
                 "test_case_id": str(test_case.id),
                 "test_suite_id": str(test_case.test_suite_id),
@@ -299,12 +357,12 @@ class TestExecutionService:
                 "evaluation_result": None,
                 "error_message": None
             }
-            initial_result_id = await self.test_result_service.create(initial_result_data)
-            logger.info(f"Created test case result {initial_result_id} with initial running status for test case {test_case.id}")
+            initial_result_id = await self.test_result_service.create_with_id(initial_result_data)
+            logger.info(f"Created test case result {initial_result_id} (using request_id) with initial running status for test case {test_case.id}")
 
-            # Simulate conversation using goals/prompts
+            # Simulate conversation using goals/prompts, passing the primary request_id
             conversation_result = await self._simulate_conversation(
-                test_case, target_agent, user_agent, concurrent_calls or test_case.default_concurrent_calls, test_run_id
+                test_case, target_agent, user_agent, calls_to_use, primary_request_id
             )
 
             # Determine status based on conversation result
@@ -326,15 +384,19 @@ class TestExecutionService:
             # Check if test case result already exists for this test run and test case
             existing_result = await self.test_result_service.get_result_by_test_run_and_case(test_run_id, test_case.id)
 
-            # Get wav_file_ids from conversation result
+            # Get wav_file_ids and request_ids from conversation result
             wav_file_ids = conversation_result.get("wav_file_ids", [])
             concurrent_calls_count = conversation_result.get("concurrent_calls", 1)
+            request_ids = conversation_result.get("request_ids", [])
+            # Use first request_id as the test_case_result.id for easy transcript fetching
+            primary_request_id = request_ids[0] if request_ids else None
 
             if existing_result:
-                # Update existing test case result with final status and recording URL
+                # Update existing test case result with initial status (evaluation will update it to pass/alert/fail)
                 update_data = {
                     "status": status,
                     "conversation_logs": conversation_result.get("conversation_logs", []),
+                    "evaluation_result": None,  # Will be updated by sequential evaluation
                     "error_message": conversation_result.get("error_message")
                 }
 
@@ -342,20 +404,37 @@ class TestExecutionService:
                 if conversation_result.get("recording_file_url"):
                     update_data["recording_file_url"] = conversation_result["recording_file_url"]
 
-                # Add wav_file_ids and concurrent_calls if available
+                # Store wav_file_ids in conversation_logs metadata since column was removed
                 if wav_file_ids:
-                    try:
-                        update_data["wav_file_ids"] = wav_file_ids
-                        update_data["concurrent_calls"] = concurrent_calls_count
-                        if len(wav_file_ids) == 1:
-                            # For backward compatibility, also set single recording_file_id
-                            update_data["recording_file_id"] = wav_file_ids[0]
-                    except Exception as e:
-                        logger.warning(f"Could not update wav_file_ids: {e}")
+                    # Add metadata entry to conversation_logs
+                    conversation_logs = update_data.get("conversation_logs", []) or []
+                    if not isinstance(conversation_logs, list):
+                        conversation_logs = []
+                    # Add metadata entry if not already present
+                    metadata_exists = any(
+                        isinstance(entry, dict) and entry.get('type') == 'recording_metadata'
+                        for entry in conversation_logs
+                    )
+                    if not metadata_exists:
+                        conversation_logs.append({
+                            "type": "recording_metadata",
+                            "wav_file_ids": wav_file_ids,
+                            "concurrent_calls": concurrent_calls_count
+                        })
+                        update_data["conversation_logs"] = conversation_logs
+                    update_data["concurrent_calls"] = concurrent_calls_count
 
                 success = await self.test_result_service.update(existing_result.id, update_data)
+                if not success:
+                    logger.error(f"Failed to update test case result {existing_result.id} status to {status}")
                 result_id = existing_result.id
-                logger.info(f"Updated existing test case result {result_id} with status {status}, {len(wav_file_ids)} recording file(s)")
+                logger.info(f"Updated test case result {result_id} to status {status}, {len(wav_file_ids)} recording file(s)")
+                
+                # Run evaluation sequentially with retries (transcripts need time to persist)
+                evaluation_result = await self._evaluate_test_results_sequential(
+                    test_case, conversation_result, user_agent, test_run_id, result_id
+                )
+                logger.info(f"Completed evaluation for test case {test_case.id}")
             else:
                 # Create new test case result (fallback)
                 result_data = {
@@ -364,7 +443,7 @@ class TestExecutionService:
                     "test_suite_id": str(test_case.test_suite_id),
                     "status": status,
                     "conversation_logs": conversation_result.get("conversation_logs", []),
-                    "evaluation_result": None,
+                    "evaluation_result": None,  # Will be updated by sequential evaluation
                     "error_message": conversation_result.get("error_message")
                 }
 
@@ -372,19 +451,35 @@ class TestExecutionService:
                 if conversation_result.get("recording_file_url"):
                     result_data["recording_file_url"] = conversation_result["recording_file_url"]
 
-                # Add wav_file_ids and concurrent_calls if available
+                # Store wav_file_ids in conversation_logs metadata since column was removed
                 if wav_file_ids:
-                    try:
-                        result_data["wav_file_ids"] = wav_file_ids
-                        result_data["concurrent_calls"] = concurrent_calls_count
-                        if len(wav_file_ids) == 1:
-                            # For backward compatibility, also set single recording_file_id
-                            result_data["recording_file_id"] = wav_file_ids[0]
-                    except Exception as e:
-                        logger.warning(f"Could not set wav_file_ids: {e}")
+                    # Add metadata entry to conversation_logs
+                    conversation_logs = result_data.get("conversation_logs", []) or []
+                    if not isinstance(conversation_logs, list):
+                        conversation_logs = []
+                    # Add metadata entry
+                    conversation_logs.append({
+                        "type": "recording_metadata",
+                        "wav_file_ids": wav_file_ids,
+                        "concurrent_calls": concurrent_calls_count
+                    })
+                    result_data["conversation_logs"] = conversation_logs
+                    result_data["concurrent_calls"] = concurrent_calls_count
 
-                result_id = await self.test_result_service.create(result_data)
-                logger.info(f"Created new test case result {result_id} with status {status}, {len(wav_file_ids)} recording file(s)")
+                # Use request_id as test_case_result.id for easy transcript fetching
+                if primary_request_id:
+                    result_data["id"] = primary_request_id
+                    result_id = await self.test_result_service.create_with_id(result_data)
+                    logger.info(f"Created new test case result {result_id} (using request_id) with status {status}, {len(wav_file_ids)} recording file(s)")
+                else:
+                    result_id = await self.test_result_service.create(result_data)
+                    logger.info(f"Created new test case result {result_id} with status {status}, {len(wav_file_ids)} recording file(s)")
+                
+                # Run evaluation sequentially with retries (transcripts need time to persist)
+                evaluation_result = await self._evaluate_test_results_sequential(
+                    test_case, conversation_result, user_agent, test_run_id, result_id
+                )
+                logger.info(f"Completed evaluation for test case {test_case.id}")
 
             return {
                 "result_id": result_id,
@@ -428,7 +523,7 @@ class TestExecutionService:
         target_agent,
         user_agent,
         concurrent_calls: int,
-        request_id: Optional[str] = None
+        primary_request_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Simulate conversations by connecting to user agent and target agent websockets,
@@ -452,12 +547,14 @@ class TestExecutionService:
             # Ensure concurrent_calls is at least 1
             concurrent_calls = max(1, concurrent_calls)
 
-            # Create concurrent conversations
+            # Create concurrent conversations (use primary_request_id for first call, generate new ones for others)
             conversation_tasks = []
             for call_num in range(concurrent_calls):
+                # Use primary_request_id for the first call, generate new ones for concurrent calls
+                call_request_id = primary_request_id if call_num == 0 else None
                 task = asyncio.create_task(
                     self._simulate_single_conversation(
-                        test_case, target_agent, user_agent, call_num + 1, request_id
+                        test_case, target_agent, user_agent, call_num + 1, call_request_id
                     )
                 )
                 conversation_tasks.append(task)
@@ -472,6 +569,7 @@ class TestExecutionService:
             successful_calls = 0
             failed_calls = 0
             wav_file_ids = []
+            request_ids = []  # Collect all request_ids for fetching transcripts from Pranthora
 
             for i, result in enumerate(conversation_results):
                 if isinstance(result, Exception):
@@ -485,6 +583,11 @@ class TestExecutionService:
                     all_conversation_logs.extend(result.get("conversation_logs", []))
                     all_audio_data.extend(result.get("audio_data", b""))
                     total_duration = max(total_duration, result.get("duration_seconds", 0))
+                    
+                    # Collect request_id for fetching transcript from Pranthora
+                    req_id = result.get("request_id")
+                    if req_id and req_id not in request_ids:
+                        request_ids.append(req_id)
 
                     # Create individual WAV file for this call
                     pcm_frames = result.get("pcm_frames", b"")
@@ -557,6 +660,7 @@ class TestExecutionService:
                 "failed_calls": failed_calls,
                 "recording_file_url": recording_file_url,  # Signed URL for first recording (backward compatibility)
                 "wav_file_ids": wav_file_ids,  # List of file IDs for all concurrent calls
+                "request_ids": request_ids,  # List of request_ids for fetching transcripts from Pranthora
                 "success": successful_calls > 0,
                 "error_message": f"{failed_calls} out of {concurrent_calls} calls failed" if failed_calls > 0 else None
             }
@@ -588,7 +692,11 @@ class TestExecutionService:
             combined_audio_data = bytearray()
             conv_start_time = time.time()
 
-            logger.info(f"[Call {call_number}] Starting conversation simulation")
+            # Generate unique request_id for this call if not provided
+            if not request_id:
+                request_id = str(uuid4())
+            
+            logger.info(f"[Call {call_number}] Starting conversation simulation with request_id: {request_id}")
 
             # Use Pranthora base URL from config to construct websocket URLs
             from static_memory_cache import StaticMemoryCache
@@ -619,7 +727,7 @@ class TestExecutionService:
 
             # Generate unique call SIDs for this conversation
             call_sid_target = str(uuid.uuid4())
-            call_sid_user = str(uuid.uuid4())
+            call_sid_user = request_id  # Use request_id as call_sid for User Agent to ensure transcript matching
 
             # Add call_sid to URLs
             if "call_sid=" not in target_ws_url:
@@ -757,6 +865,7 @@ class TestExecutionService:
                 "audio_format": "mulaw 8kHz",
                 "duration_seconds": conv_duration,
                 "call_number": call_number,
+                "request_id": request_id,  # Store request_id for fetching transcript from Pranthora
                 "error_message": error_message if 'error_message' in locals() else None,
                 "success": True
             }
@@ -1036,57 +1145,179 @@ class TestExecutionService:
             logger.error(f"[User] Connection failed: {e}")
             raise
 
-    async def _evaluate_test_results(
+    async def _evaluate_test_results_sequential(
         self,
         test_case: TestCase,
         conversation_result: Dict[str, Any],
-        user_agent
-    ) -> Dict[str, Any]:
-        """Evaluate test results based on evaluation criteria."""
+        user_agent,
+        test_run_id: UUID,
+        result_id: UUID
+    ):
+        """Sequential evaluation with retry logic for fetching transcripts."""
         try:
-            evaluation_result = {
-                "criteria_evaluated": [],
-                "overall_score": 0.0,
-                "passed_criteria": 0,
-                "total_criteria": len(test_case.evaluation_criteria),
-                "evaluation_details": []
-            }
+            request_ids = self._extract_request_ids(conversation_result)
+            if not request_ids:
+                logger.warning(f"No request_ids found for test case {test_case.id}")
+                # Update status to failed if no request_ids
+                await self.test_result_service.update(result_id, {
+                    "status": "failed",
+                    "error_message": "No request_ids found for transcript fetching"
+                })
+                return None
 
-            # For now, provide mock evaluation
-            # In real implementation, this would use the user agent to evaluate
-            # the conversation against the evaluation criteria
-
-            for i, criterion in enumerate(test_case.evaluation_criteria):
-                # Handle evaluation_criteria as strings (not dictionaries)
-                criterion_text = criterion if isinstance(criterion, str) else criterion.get("expected", "") if isinstance(criterion, dict) else str(criterion)
-                
-                criterion_result = {
-                    "criterion_id": i + 1,
-                    "type": "text_match" if isinstance(criterion, str) else criterion.get("type", "unknown") if isinstance(criterion, dict) else "unknown",
-                    "expected": criterion_text,
-                    "passed": True,  # Mock pass for now
-                    "score": 1.0,
-                    "details": f"Mock evaluation of criterion: {criterion_text}"
-                }
-
-                evaluation_result["criteria_evaluated"].append(criterion_result)
-                if criterion_result["passed"]:
-                    evaluation_result["passed_criteria"] += 1
-                    evaluation_result["overall_score"] += criterion_result["score"]
-
-            if evaluation_result["total_criteria"] > 0:
-                evaluation_result["overall_score"] /= evaluation_result["total_criteria"]
-
+            # Fetch transcript with more retries (10 retries, 5 second delay = up to 50 seconds wait)
+            transcript = await self._fetch_transcript_with_retry(request_ids, max_retries=10, retry_delay=5)
+            
+            if not transcript:
+                # All retries exhausted, update status to failed
+                logger.error(f"Failed to fetch transcript after all retries for test case {test_case.id}")
+                await self.test_result_service.update(result_id, {
+                    "status": "failed",
+                    "error_message": "Failed to fetch transcript after all retries"
+                })
+                return None
+            
+            # Run evaluation
+            evaluation_result = await self._run_evaluation(
+                test_case, transcript, user_agent
+            )
+            
+            # Update evaluation result
+            await self._update_test_case_result_with_evaluation(
+                test_run_id, test_case.id, evaluation_result
+            )
+            
+            # Determine final status based on evaluation
+            final_status = self._determine_test_status(evaluation_result)
+            
+            # Update status to complete (pass/alert/fail based on evaluation)
+            await self.test_result_service.update(result_id, {
+                "status": final_status,
+                "evaluation_result": evaluation_result
+            })
+            
+            logger.info(f"Evaluation completed for test case {test_case.id} with status: {final_status}")
             return evaluation_result
-
+            
         except Exception as e:
-            logger.error(f"Error evaluating test results: {e}")
+            logger.error(f"Sequential evaluation error: {e}", exc_info=True)
+            # Update status to failed on exception
+            try:
+                await self.test_result_service.update(result_id, {
+                    "status": "failed",
+                    "error_message": f"Evaluation error: {str(e)}"
+                })
+            except Exception as update_error:
+                logger.error(f"Failed to update status after evaluation error: {update_error}")
+            return None
+
+    def _extract_request_ids(self, conversation_result: Dict[str, Any]) -> List[str]:
+        """Extract request_ids from conversation result."""
+        request_ids = conversation_result.get("request_ids", [])
+        if not request_ids:
+            single_id = conversation_result.get("request_id")
+            if single_id:
+                request_ids = [single_id]
+        return request_ids
+
+    async def _fetch_transcript_with_retry(
+        self, request_ids: List[str], max_retries: int = 10, retry_delay: int = 5
+    ) -> List[Dict[str, Any]]:
+        """Fetch transcript with retry logic. Returns empty list if all retries exhausted."""
+        transcript = []
+        for request_id in request_ids:
+            fetched = False
+            for attempt in range(max_retries + 1):
+                try:
+                    if attempt > 0:
+                        logger.info(f"Retry {attempt}/{max_retries} for request_id {request_id} (waiting {retry_delay}s)")
+                        await asyncio.sleep(retry_delay)
+                    else:
+                        logger.info(f"Fetching transcript for request_id: {request_id}")
+                    
+                    call_logs = await self.pranthora_client.get_call_logs(request_id)
+                    if call_logs and call_logs.get("call_transcript"):
+                        transcript.extend(self._parse_transcript(call_logs["call_transcript"]))
+                        logger.info(f"✅ Successfully fetched {len(call_logs['call_transcript'])} messages for request_id: {request_id}")
+                        fetched = True
+                        break
+                    elif call_logs:
+                        logger.warning(f"Call logs found for {request_id} but no transcript available")
+                    else:
+                        logger.debug(f"Call logs not found for request_id {request_id} (attempt {attempt + 1}/{max_retries + 1})")
+                        
+                except Exception as e:
+                    if attempt < max_retries:
+                        logger.warning(f"Error fetching transcript for {request_id} (attempt {attempt + 1}/{max_retries + 1}): {e}")
+                    else:
+                        logger.error(f"Failed to fetch transcript for {request_id} after {max_retries + 1} attempts: {e}")
+            
+            if not fetched:
+                logger.error(f"❌ Failed to fetch transcript for request_id {request_id} after all {max_retries + 1} attempts")
+        
+        return transcript
+
+    def _parse_transcript(self, call_transcript: List[Any]) -> List[Dict[str, Any]]:
+        """Parse transcript messages to standard format."""
+        parsed = []
+        for msg in call_transcript:
+            if isinstance(msg, dict):
+                role = self._normalize_role(msg.get("role", "unknown"))
+                content = msg.get("content", msg.get("message", ""))
+                if content:
+                    parsed.append(TranscriptMessage(
+                        role=role,
+                        content=content,
+                        timestamp=msg.get("timestamp", "")
+                    ).model_dump())
+        return parsed
+
+    def _normalize_role(self, role: Any) -> str:
+        """Normalize role to user or assistant."""
+        if hasattr(role, "value"):
+            role = role.value
+        elif hasattr(role, "name"):
+            role = role.name.lower()
+        role_str = str(role).lower()
+        return "user" if role_str == "user" else "assistant"
+
+    async def _run_evaluation(
+        self, test_case: TestCase, transcript: List[Dict[str, Any]], user_agent
+    ) -> Dict[str, Any]:
+        """Run evaluation with transcript."""
+        try:
+            return await self.evaluation_service.evaluate_with_retry(
+                transcript=transcript,
+                goals=test_case.goals or [],
+                evaluation_criteria=test_case.evaluation_criteria or [],
+                test_case_name=test_case.name,
+                max_retries=2
+            )
+        except Exception as e:
+            logger.error(f"Evaluation error: {e}", exc_info=True)
             return {
                 "error": str(e),
                 "overall_score": 0.0,
-                "passed_criteria": 0,
-                "total_criteria": len(test_case.evaluation_criteria)
+                "overall_status": "failed",
+                "summary": f"Evaluation failed: {str(e)}",
+                "timestamp": time.time()
             }
+
+    async def _update_test_case_result_with_evaluation(
+        self, test_run_id: UUID, test_case_id: UUID, evaluation_result: Dict[str, Any]
+    ):
+        """Update test case result with evaluation."""
+        try:
+            existing = await self.test_result_service.get_result_by_test_run_and_case(
+                test_run_id, test_case_id
+            )
+            if existing:
+                await self.test_result_service.update(
+                    existing.id, {"evaluation_result": evaluation_result}
+                )
+                logger.info(f"Updated evaluation for test case {test_case_id}")
+        except Exception as e:
+            logger.error(f"Failed to update evaluation: {e}", exc_info=True)
 
     def _determine_test_status(self, evaluation_result: Dict[str, Any]) -> str:
         """Determine the overall test status based on evaluation results."""

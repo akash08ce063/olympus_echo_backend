@@ -219,3 +219,38 @@ class PranthoraApiClient:
         except Exception as e:
             logger.error(f"Error deleting agent from Pranthora: {e}")
             raise
+
+    async def get_call_logs(self, request_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get call logs/session transcripts from Pranthora backend by request ID.
+        
+        The request_id is the same as the x-pranthora-callid header value
+        used when starting the test case execution.
+
+        Args:
+            request_id: The request ID (x-pranthora-callid)
+
+        Returns:
+            Call session data including transcripts, or None if not found
+        """
+        try:
+            url = f"{self.base_url}/api/v1/call-analytics/call-logs/{request_id}"
+            logger.debug(f"Fetching call logs from Pranthora for request_id: {request_id}")
+
+            response = await self.client.get(url)
+
+            if response.status_code == 200:
+                result = response.json()
+                logger.debug(f"Successfully fetched call logs for request_id: {request_id}")
+                return result
+            elif response.status_code == 404:
+                logger.warning(f"Call logs not found for request_id: {request_id}")
+                return None
+            else:
+                error_detail = response.text
+                logger.error(f"Failed to get call logs from Pranthora: {response.status_code} - {error_detail}")
+                raise Exception(f"Pranthora API error: {response.status_code} - {error_detail}")
+
+        except Exception as e:
+            logger.error(f"Error getting call logs from Pranthora: {e}")
+            raise

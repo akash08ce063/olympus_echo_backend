@@ -35,7 +35,8 @@ class RecordingStorageService:
             file_name: Original filename (will be prefixed with UUID)
             content_type: MIME type of the file (default: audio/wav)
 
-        File path format: recording_files/{uuid}_{filename}
+        Files are stored directly in the bucket root (no subfolders).
+        File path format: {uuid}_{filename} (in recording_files bucket)
 
         Returns:
             UUID of the uploaded file if successful, None otherwise
@@ -46,8 +47,8 @@ class RecordingStorageService:
             # Generate a unique file ID
             file_id = uuid4()
 
-            # Create the file path directly in recording_files bucket
-            # Format: recording_files/{uuid}_{original_filename}
+            # Create the file path directly in bucket root (no folders)
+            # Format: {file_id}_{file_name}
             file_path = f"{file_id}_{file_name}"
 
             # Upload the file to Supabase storage
