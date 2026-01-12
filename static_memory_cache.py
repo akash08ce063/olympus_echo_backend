@@ -78,6 +78,11 @@ class StaticMemoryCache:
         return cls.get_section("pranthora")
 
     @classmethod
+    def get_audio_chunk_duration_ms(cls) -> float:
+        """Get audio chunk duration in milliseconds from config."""
+        return float(cls.get_config("audio", "chunk_duration_ms", 20.0))
+
+    @classmethod
     def is_initialized(cls) -> bool:
         """Check if cache has been initialized."""
         return cls._initialized

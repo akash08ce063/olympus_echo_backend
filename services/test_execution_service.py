@@ -19,7 +19,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 import websockets
-from websockets.exceptions import ConnectionClosed, ConnectionClosedOK, ConnectionClosedError
+from websockets.exceptions import ConnectionClosedOK, ConnectionClosedError
 
 from services.database_service import DatabaseService
 from services.test_case_service import TestCaseService
@@ -30,15 +30,13 @@ from services.test_history_service import TestRunHistoryService, TestCaseResultS
 from services.recording_storage_service import RecordingStorageService
 from services.pranthora_api_client import PranthoraApiClient
 from services.evaluation_agent_service import EvaluationAgentService
-from models.test_suite_models import (
-    TestSuite, TestCase, TestRunHistory, TestCaseResult,
-    TestRunHistoryBase, TestCaseResultBase
-)
+from models.test_suite_models import TestCase
 from telemetrics.logger import logger
 
 
 class TranscriptMessage(BaseModel):
     """Pydantic model for transcript message."""
+
     role: str = Field(..., description="Message role: user or assistant")
     content: str = Field(..., description="Message content")
     timestamp: Optional[str] = Field(None, description="Message timestamp")
@@ -46,6 +44,7 @@ class TranscriptMessage(BaseModel):
 
 class EvaluationRequest(BaseModel):
     """Pydantic model for evaluation request."""
+
     test_case_id: UUID
     test_run_id: UUID
     request_ids: List[str] = Field(..., description="Request IDs to fetch transcripts")
@@ -72,7 +71,11 @@ class TestExecutionService:
         # Recording setup
         self.sample_rate = 8000  # μ-law sample rate
 
+        # Read chunk duration from config
+        from static_memory_cache import StaticMemoryCache
 
+        chunk_duration_ms = StaticMemoryCache.get_audio_chunk_duration_ms()
+        self.chunk_duration_seconds = chunk_duration_ms / 1000.0
 
     async def run_test_suite(
         self,
@@ -80,7 +83,7 @@ class TestExecutionService:
         user_id: UUID,
         concurrent_calls: Optional[int] = None,
         request_id: Optional[str] = None,
-        execution_mode: str = "sequential"
+        execution_mode: str = "sequential",
     ) -> UUID:
         """
         Run all active test cases in a test suite.
@@ -101,7 +104,9 @@ class TestExecutionService:
                 raise ValueError(f"Test suite {test_suite_id} not found")
 
             if test_suite.user_id != user_id:
-                raise ValueError(f"User {user_id} does not have access to test suite {test_suite_id}")
+                raise ValueError(
+                    f"User {user_id} does not have access to test suite {test_suite_id}"
+                )
 
             # Get active test cases for the suite
             test_cases = await self.test_case_service.get_test_cases_by_suite(
@@ -112,14 +117,20 @@ class TestExecutionService:
                 raise ValueError(f"No active test cases found in test suite {test_suite_id}")
 
             # Create test run record
-            test_run_id = await self._create_test_run(test_suite_id, user_id, len(test_cases), request_id)
+            test_run_id = await self._create_test_run(
+                test_suite_id, user_id, len(test_cases), request_id
+            )
 
             # Execute test cases asynchronously
             asyncio.create_task(
-                self._execute_test_cases_async(test_run_id, test_cases, concurrent_calls, execution_mode)
+                self._execute_test_cases_async(
+                    test_run_id, test_cases, concurrent_calls, execution_mode
+                )
             )
 
-            logger.info(f"Started test suite execution: {test_run_id} with {len(test_cases)} test cases")
+            logger.info(
+                f"Started test suite execution: {test_run_id} with {len(test_cases)} test cases"
+            )
             return test_run_id
 
         except Exception as e:
@@ -131,7 +142,7 @@ class TestExecutionService:
         test_case_id: UUID,
         user_id: UUID,
         concurrent_calls: Optional[int] = None,
-        request_id: Optional[str] = None
+        request_id: Optional[str] = None,
     ) -> UUID:
         """
         Run a single test case.
@@ -157,7 +168,9 @@ class TestExecutionService:
                 raise ValueError(f"User {user_id} does not have access to test case {test_case_id}")
 
             # Create test run record
-            test_run_id = await self._create_test_run(test_case.test_suite_id, user_id, 1, request_id)
+            test_run_id = await self._create_test_run(
+                test_case.test_suite_id, user_id, 1, request_id
+            )
 
             # Execute single test case asynchronously
             asyncio.create_task(
@@ -171,7 +184,9 @@ class TestExecutionService:
             logger.error(f"Error starting single test case execution: {e}")
             raise
 
-    async def _create_test_run(self, test_suite_id: UUID, user_id: UUID, total_cases: int, request_id: Optional[str] = None) -> UUID:
+    async def _create_test_run(
+        self, test_suite_id: UUID, user_id: UUID, total_cases: int, request_id: Optional[str] = None
+    ) -> UUID:
         """Create a new test run record."""
         run_data = {
             "test_suite_id": str(test_suite_id),
@@ -186,7 +201,10 @@ class TestExecutionService:
 
         # If request_id is provided and it's a valid UUID, use it as the primary key
         import re
-        uuid_pattern = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE)
+
+        uuid_pattern = re.compile(
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
+        )
 
         if request_id and uuid_pattern.match(request_id):
             run_data["id"] = request_id
@@ -203,7 +221,7 @@ class TestExecutionService:
         test_run_id: UUID,
         test_cases: List[TestCase],
         concurrent_calls: Optional[int] = None,
-        execution_mode: str = "sequential"
+        execution_mode: str = "sequential",
     ):
         """Execute multiple test cases asynchronously."""
         try:
@@ -220,7 +238,7 @@ class TestExecutionService:
                     for test_case in test_cases
                 ]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
-                
+
                 # Process results
                 for i, result in enumerate(results):
                     if isinstance(result, Exception):
@@ -237,7 +255,9 @@ class TestExecutionService:
                 logger.info(f"Executing {len(test_cases)} test cases in sequential mode")
                 for test_case in test_cases:
                     try:
-                        result = await self._execute_test_case(test_case, test_run_id, concurrent_calls)
+                        result = await self._execute_test_case(
+                            test_case, test_run_id, concurrent_calls
+                        )
                         results.append(result)
 
                         # Status values: completed, failed
@@ -257,17 +277,16 @@ class TestExecutionService:
                 test_run_id, final_status, passed_count, failed_count, alert_count
             )
 
-            logger.info(f"Completed test run {test_run_id}: status={final_status}, {passed_count} passed, {failed_count} failed, {alert_count} alerts (mode: {execution_mode})")
+            logger.info(
+                f"Completed test run {test_run_id}: status={final_status}, {passed_count} passed, {failed_count} failed, {alert_count} alerts (mode: {execution_mode})"
+            )
 
         except Exception as e:
             logger.error(f"Error in test case execution: {e}")
             await self._update_test_run_status(test_run_id, "failed", 0, 0, 0)
 
     async def _execute_single_test_case_async(
-        self,
-        test_run_id: UUID,
-        test_case: TestCase,
-        concurrent_calls: Optional[int] = None
+        self, test_run_id: UUID, test_case: TestCase, concurrent_calls: Optional[int] = None
     ):
         """Execute a single test case asynchronously."""
         try:
@@ -284,17 +303,16 @@ class TestExecutionService:
                 test_run_id, test_run_status, passed_count, failed_count, alert_count
             )
 
-            logger.info(f"Completed single test case execution {test_run_id}: {result['status']}, run status: {test_run_status}")
+            logger.info(
+                f"Completed single test case execution {test_run_id}: {result['status']}, run status: {test_run_status}"
+            )
 
         except Exception as e:
             logger.error(f"Error in single test case execution: {e}")
             # Don't update test run status on error either - let external processes handle completion
 
     async def _execute_test_case(
-        self,
-        test_case: TestCase,
-        test_run_id: UUID,
-        concurrent_calls: Optional[int] = None
+        self, test_case: TestCase, test_run_id: UUID, concurrent_calls: Optional[int] = None
     ) -> Dict[str, Any]:
         """Execute a single test case."""
         try:
@@ -308,7 +326,9 @@ class TestExecutionService:
             # Validate agents exist
             target_agent = None
             if test_suite.target_agent_id:
-                target_agent = await self.target_agent_service.get_target_agent(test_suite.target_agent_id)
+                target_agent = await self.target_agent_service.get_target_agent(
+                    test_suite.target_agent_id
+                )
 
             user_agent = None
             if test_suite.user_agent_id:
@@ -320,7 +340,7 @@ class TestExecutionService:
                 return {
                     "result_id": None,
                     "status": "failed",
-                    "error": f"Target agent not found for test suite {test_case.test_suite_id}"
+                    "error": f"Target agent not found for test suite {test_case.test_suite_id}",
                 }
 
             if not user_agent:
@@ -329,7 +349,7 @@ class TestExecutionService:
                 return {
                     "result_id": None,
                     "status": "failed",
-                    "error": f"User agent not found for test suite {test_case.test_suite_id}"
+                    "error": f"User agent not found for test suite {test_case.test_suite_id}",
                 }
 
             # Generate request_id early so we can use it as test_case_result.id
@@ -342,10 +362,10 @@ class TestExecutionService:
             else:
                 # Test case doesn't have a default, use provided concurrent_calls or fallback to 1
                 calls_to_use = concurrent_calls if concurrent_calls and concurrent_calls > 0 else 1
-            
+
             # Generate primary request_id for the first call (will be used as test_case_result.id)
             primary_request_id = str(uuid4())
-            
+
             # Create initial test case result with "running" status, using request_id as the ID
             initial_result_data = {
                 "id": primary_request_id,  # Use request_id as the test_case_result.id
@@ -355,10 +375,12 @@ class TestExecutionService:
                 "status": "running",
                 "conversation_logs": [],
                 "evaluation_result": None,
-                "error_message": None
+                "error_message": None,
             }
             initial_result_id = await self.test_result_service.create_with_id(initial_result_data)
-            logger.info(f"Created test case result {initial_result_id} (using request_id) with initial running status for test case {test_case.id}")
+            logger.info(
+                f"Created test case result {initial_result_id} (using request_id) with initial running status for test case {test_case.id}"
+            )
 
             # Simulate conversation using goals/prompts, passing the primary request_id
             conversation_result = await self._simulate_conversation(
@@ -368,7 +390,10 @@ class TestExecutionService:
             # Determine status based on conversation result
             if conversation_result.get("success", False):
                 # WebSocket connections successful - conversation completed
-                if conversation_result.get("error_message") and "timeout" in conversation_result.get("error_message", "").lower():
+                if (
+                    conversation_result.get("error_message")
+                    and "timeout" in conversation_result.get("error_message", "").lower()
+                ):
                     # Conversation timeout - completed
                     status = "completed"
                     logger.info(f"Conversation completed with timeout for test case {test_case.id}")
@@ -379,10 +404,14 @@ class TestExecutionService:
             else:
                 # Other errors - failed
                 status = "failed"
-                logger.error(f"Conversation failed for test case {test_case.id}: {conversation_result.get('error_message', 'Unknown error')}")
+                logger.error(
+                    f"Conversation failed for test case {test_case.id}: {conversation_result.get('error_message', 'Unknown error')}"
+                )
 
             # Check if test case result already exists for this test run and test case
-            existing_result = await self.test_result_service.get_result_by_test_run_and_case(test_run_id, test_case.id)
+            existing_result = await self.test_result_service.get_result_by_test_run_and_case(
+                test_run_id, test_case.id
+            )
 
             # Get wav_file_ids and request_ids from conversation result
             wav_file_ids = conversation_result.get("wav_file_ids", [])
@@ -397,7 +426,7 @@ class TestExecutionService:
                     "status": status,
                     "conversation_logs": conversation_result.get("conversation_logs", []),
                     "evaluation_result": None,  # Will be updated by sequential evaluation
-                    "error_message": conversation_result.get("error_message")
+                    "error_message": conversation_result.get("error_message"),
                 }
 
                 # Add recording URL if available (from first recording for backward compatibility)
@@ -412,26 +441,32 @@ class TestExecutionService:
                         conversation_logs = []
                     # Add metadata entry if not already present
                     metadata_exists = any(
-                        isinstance(entry, dict) and entry.get('type') == 'recording_metadata'
+                        isinstance(entry, dict) and entry.get("type") == "recording_metadata"
                         for entry in conversation_logs
                     )
                     if not metadata_exists:
-                        conversation_logs.append({
-                            "type": "recording_metadata",
-                            "wav_file_ids": wav_file_ids,
-                            "concurrent_calls": concurrent_calls_count
-                        })
+                        conversation_logs.append(
+                            {
+                                "type": "recording_metadata",
+                                "wav_file_ids": wav_file_ids,
+                                "concurrent_calls": concurrent_calls_count,
+                            }
+                        )
                         update_data["conversation_logs"] = conversation_logs
                     update_data["concurrent_calls"] = concurrent_calls_count
 
                 success = await self.test_result_service.update(existing_result.id, update_data)
                 if not success:
-                    logger.error(f"Failed to update test case result {existing_result.id} status to {status}")
+                    logger.error(
+                        f"Failed to update test case result {existing_result.id} status to {status}"
+                    )
                 result_id = existing_result.id
-                logger.info(f"Updated test case result {result_id} to status {status}, {len(wav_file_ids)} recording file(s)")
-                
+                logger.info(
+                    f"Updated test case result {result_id} to status {status}, {len(wav_file_ids)} recording file(s)"
+                )
+
                 # Run evaluation sequentially with retries (transcripts need time to persist)
-                evaluation_result = await self._evaluate_test_results_sequential(
+                await self._evaluate_test_results_sequential(
                     test_case, conversation_result, user_agent, test_run_id, result_id
                 )
                 logger.info(f"Completed evaluation for test case {test_case.id}")
@@ -444,7 +479,7 @@ class TestExecutionService:
                     "status": status,
                     "conversation_logs": conversation_result.get("conversation_logs", []),
                     "evaluation_result": None,  # Will be updated by sequential evaluation
-                    "error_message": conversation_result.get("error_message")
+                    "error_message": conversation_result.get("error_message"),
                 }
 
                 # Add recording URL if available
@@ -458,11 +493,13 @@ class TestExecutionService:
                     if not isinstance(conversation_logs, list):
                         conversation_logs = []
                     # Add metadata entry
-                    conversation_logs.append({
-                        "type": "recording_metadata",
-                        "wav_file_ids": wav_file_ids,
-                        "concurrent_calls": concurrent_calls_count
-                    })
+                    conversation_logs.append(
+                        {
+                            "type": "recording_metadata",
+                            "wav_file_ids": wav_file_ids,
+                            "concurrent_calls": concurrent_calls_count,
+                        }
+                    )
                     result_data["conversation_logs"] = conversation_logs
                     result_data["concurrent_calls"] = concurrent_calls_count
 
@@ -470,13 +507,17 @@ class TestExecutionService:
                 if primary_request_id:
                     result_data["id"] = primary_request_id
                     result_id = await self.test_result_service.create_with_id(result_data)
-                    logger.info(f"Created new test case result {result_id} (using request_id) with status {status}, {len(wav_file_ids)} recording file(s)")
+                    logger.info(
+                        f"Created new test case result {result_id} (using request_id) with status {status}, {len(wav_file_ids)} recording file(s)"
+                    )
                 else:
                     result_id = await self.test_result_service.create(result_data)
-                    logger.info(f"Created new test case result {result_id} with status {status}, {len(wav_file_ids)} recording file(s)")
-                
+                    logger.info(
+                        f"Created new test case result {result_id} with status {status}, {len(wav_file_ids)} recording file(s)"
+                    )
+
                 # Run evaluation sequentially with retries (transcripts need time to persist)
-                evaluation_result = await self._evaluate_test_results_sequential(
+                await self._evaluate_test_results_sequential(
                     test_case, conversation_result, user_agent, test_run_id, result_id
                 )
                 logger.info(f"Completed evaluation for test case {test_case.id}")
@@ -484,7 +525,7 @@ class TestExecutionService:
             return {
                 "result_id": result_id,
                 "status": status,
-                "conversation_result": conversation_result
+                "conversation_result": conversation_result,
             }
 
         except Exception as e:
@@ -492,13 +533,14 @@ class TestExecutionService:
             # Update or create failed result
             try:
                 # Check if test case result already exists
-                existing_result = await self.test_result_service.get_result_by_test_run_and_case(test_run_id, test_case.id)
+                existing_result = await self.test_result_service.get_result_by_test_run_and_case(
+                    test_run_id, test_case.id
+                )
 
                 if existing_result:
                     # Update existing result to failed
                     await self.test_result_service.update(
-                        existing_result.id,
-                        {"status": "failed", "error_message": str(e)}
+                        existing_result.id, {"status": "failed", "error_message": str(e)}
                     )
                     result_id = existing_result.id
                 else:
@@ -508,7 +550,7 @@ class TestExecutionService:
                         "test_case_id": str(test_case.id),
                         "test_suite_id": str(test_case.test_suite_id),
                         "status": "failed",
-                        "error_message": str(e)
+                        "error_message": str(e),
                     }
                     result_id = await self.test_result_service.create(result_data)
 
@@ -523,7 +565,7 @@ class TestExecutionService:
         target_agent,
         user_agent,
         concurrent_calls: int,
-        primary_request_id: Optional[str] = None
+        primary_request_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Simulate conversations by connecting to user agent and target agent websockets,
@@ -534,8 +576,12 @@ class TestExecutionService:
         try:
             start_time = time.time()
 
-            logger.info(f"Starting conversation simulation for test case {test_case.id} with {concurrent_calls} concurrent call(s)")
-            logger.info(f"Target agent: {target_agent.websocket_url}, User agent: {user_agent.pranthora_agent_id}")
+            logger.info(
+                f"Starting conversation simulation for test case {test_case.id} with {concurrent_calls} concurrent call(s)"
+            )
+            logger.info(
+                f"Target agent: {target_agent.websocket_url}, User agent: {user_agent.pranthora_agent_id}"
+            )
 
             # Validate agents have required information
             if not target_agent.websocket_url:
@@ -583,7 +629,7 @@ class TestExecutionService:
                     all_conversation_logs.extend(result.get("conversation_logs", []))
                     all_audio_data.extend(result.get("audio_data", b""))
                     total_duration = max(total_duration, result.get("duration_seconds", 0))
-                    
+
                     # Collect request_id for fetching transcript from Pranthora
                     req_id = result.get("request_id")
                     if req_id and req_id not in request_ids:
@@ -596,34 +642,42 @@ class TestExecutionService:
                         try:
                             # Create WAV file data in memory
                             wav_buffer = io.BytesIO()
-                            with wave.open(wav_buffer, 'wb') as wf:
-                                wf.setnchannels(1)      # Mono
-                                wf.setsampwidth(2)      # 16-bit PCM
+                            with wave.open(wav_buffer, "wb") as wf:
+                                wf.setnchannels(1)  # Mono
+                                wf.setsampwidth(2)  # 16-bit PCM
                                 wf.setframerate(self.sample_rate)
                                 wf.writeframes(pcm_frames)
 
                             wav_data = wav_buffer.getvalue()
                             # Fixed format: test_case_{test_case.id}_call_{index}_recording.wav
-                            wav_filename = f"test_case_{test_case.id}_call_{call_number}_recording.wav"
+                            wav_filename = (
+                                f"test_case_{test_case.id}_call_{call_number}_recording.wav"
+                            )
 
                             # Upload individual WAV file to Supabase
                             wav_file_id = await self.recording_service.upload_recording_file(
                                 file_content=wav_data,
                                 file_name=wav_filename,
-                                content_type="audio/wav"
+                                content_type="audio/wav",
                             )
 
                             if wav_file_id:
                                 wav_file_ids.append(str(wav_file_id))
-                                logger.info(f"📤 Uploaded WAV file for call {call_number}: {wav_file_id}_{wav_filename}")
+                                logger.info(
+                                    f"📤 Uploaded WAV file for call {call_number}: {wav_file_id}_{wav_filename}"
+                                )
                             else:
                                 logger.error(f"Failed to upload WAV file for call {call_number}")
 
                         except Exception as e:
-                            logger.error(f"Failed to create/upload WAV file for call {call_number}: {e}")
+                            logger.error(
+                                f"Failed to create/upload WAV file for call {call_number}: {e}"
+                            )
                 else:
                     failed_calls += 1
-                    logger.error(f"Conversation {i+1} failed: {result.get('error_message', 'Unknown error')}")
+                    logger.error(
+                        f"Conversation {i+1} failed: {result.get('error_message', 'Unknown error')}"
+                    )
 
             duration_seconds = time.time() - start_time
 
@@ -632,11 +686,14 @@ class TestExecutionService:
             if wav_file_ids:
                 try:
                     from data_layer.supabase_client import get_supabase_client
+
                     supabase_client = await get_supabase_client()
                     first_file_id = wav_file_ids[0]
                     first_filename = f"test_case_{test_case.id}_call_1_recording.wav"
                     file_path = f"{first_file_id}_{first_filename}"
-                    recording_file_url = await supabase_client.create_signed_url("recording_files", file_path, 3600)
+                    recording_file_url = await supabase_client.create_signed_url(
+                        "recording_files", file_path, 3600
+                    )
                     if recording_file_url:
                         logger.info(f"📤 Generated signed URL for first recording: {file_path}")
                 except Exception as e:
@@ -662,7 +719,11 @@ class TestExecutionService:
                 "wav_file_ids": wav_file_ids,  # List of file IDs for all concurrent calls
                 "request_ids": request_ids,  # List of request_ids for fetching transcripts from Pranthora
                 "success": successful_calls > 0,
-                "error_message": f"{failed_calls} out of {concurrent_calls} calls failed" if failed_calls > 0 else None
+                "error_message": (
+                    f"{failed_calls} out of {concurrent_calls} calls failed"
+                    if failed_calls > 0
+                    else None
+                ),
             }
 
         except Exception as e:
@@ -672,7 +733,7 @@ class TestExecutionService:
                 "audio_data": b"",
                 "combined_audio_bytes": 0,
                 "error_message": str(e),
-                "success": False
+                "success": False,
             }
 
     async def _simulate_single_conversation(
@@ -681,7 +742,7 @@ class TestExecutionService:
         target_agent,
         user_agent,
         call_number: int,
-        request_id: Optional[str] = None
+        request_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Simulate a single conversation between target and user agents.
@@ -695,11 +756,14 @@ class TestExecutionService:
             # Generate unique request_id for this call if not provided
             if not request_id:
                 request_id = str(uuid4())
-            
-            logger.info(f"[Call {call_number}] Starting conversation simulation with request_id: {request_id}")
+
+            logger.info(
+                f"[Call {call_number}] Starting conversation simulation with request_id: {request_id}"
+            )
 
             # Use Pranthora base URL from config to construct websocket URLs
             from static_memory_cache import StaticMemoryCache
+
             pranthora_base_url = StaticMemoryCache.get_pranthora_base_url()
             if not pranthora_base_url:
                 raise ValueError("Pranthora base URL not configured")
@@ -718,12 +782,15 @@ class TestExecutionService:
 
             # Replace the port in target_ws_url with the port from pranthora_base_url
             import re
-            port_match = re.search(r':(\d+)', pranthora_base_url)
+
+            port_match = re.search(r":(\d+)", pranthora_base_url)
             if port_match:
                 pranthora_port = port_match.group(1)
-                target_ws_url = re.sub(r':\d+', f':{pranthora_port}', target_ws_url)
+                target_ws_url = re.sub(r":\d+", f":{pranthora_port}", target_ws_url)
 
-            user_ws_url = f"{base_ws_url}/api/call/media-stream/agents/{user_agent.pranthora_agent_id}"
+            user_ws_url = (
+                f"{base_ws_url}/api/call/media-stream/agents/{user_agent.pranthora_agent_id}"
+            )
 
             # Generate unique call SIDs for this conversation
             call_sid_target = str(uuid.uuid4())
@@ -753,24 +820,28 @@ class TestExecutionService:
                     pcm = audioop.ulaw2lin(audio_bytes, 2)  # 16-bit PCM
                     isolated_pcm_frames.extend(pcm)
 
-                    conversation_logs.append({
-                        "call_number": call_number,
-                        "turn": len(conversation_logs),
-                        "type": f"{source}_audio",
-                        "content": f"Audio received from {source} agent ({len(audio_bytes)} bytes)",
-                        "timestamp": datetime.utcnow().isoformat()
-                    })
+                    conversation_logs.append(
+                        {
+                            "call_number": call_number,
+                            "turn": len(conversation_logs),
+                            "type": f"{source}_audio",
+                            "content": f"Audio received from {source} agent ({len(audio_bytes)} bytes)",
+                            "timestamp": datetime.utcnow().isoformat(),
+                        }
+                    )
                 except Exception as e:
                     logger.error(f"[Call {call_number}] Bridge recording error from {source}: {e}")
 
             # Log conversation start
-            conversation_logs.append({
-                "call_number": call_number,
-                "turn": 0,
-                "type": "system",
-                "content": f"Starting conversation test with {len(test_case.goals)} goals",
-                "timestamp": datetime.utcnow().isoformat()
-            })
+            conversation_logs.append(
+                {
+                    "call_number": call_number,
+                    "turn": 0,
+                    "type": "system",
+                    "content": f"Starting conversation test with {len(test_case.goals)} goals",
+                    "timestamp": datetime.utcnow().isoformat(),
+                }
+            )
 
             # Start websocket connections for this conversation
             target_task = asyncio.create_task(
@@ -780,8 +851,9 @@ class TestExecutionService:
                     target_to_user_queue,
                     user_to_target_queue,
                     stop_event,
-                    lambda audio: record_audio_bridge(audio, "target"),
-                    conversation_logs
+                    None,  # No longer recording what we receive (to avoid duplicates)
+                    conversation_logs,
+                    record_sent_callback=lambda audio: record_audio_bridge(audio, "user_to_target"),
                 )
             )
 
@@ -792,9 +864,10 @@ class TestExecutionService:
                     target_to_user_queue,
                     user_to_target_queue,
                     stop_event,
-                    lambda audio: record_audio_bridge(audio, "user"),
+                    None,  # No longer recording what we receive (to avoid duplicates)
                     conversation_logs,
-                    request_id
+                    request_id,
+                    record_sent_callback=lambda audio: record_audio_bridge(audio, "target_to_user"),
                 )
             )
 
@@ -806,7 +879,7 @@ class TestExecutionService:
             try:
                 results = await asyncio.wait_for(
                     asyncio.gather(target_task, user_task, return_exceptions=True),
-                    timeout=timeout_seconds
+                    timeout=timeout_seconds,
                 )
 
                 # Check if any of the tasks failed
@@ -819,14 +892,18 @@ class TestExecutionService:
                         break
 
             except asyncio.TimeoutError:
-                logger.info(f"[Call {call_number}] Conversation timeout reached ({timeout_seconds}s)")
-                conversation_logs.append({
-                    "call_number": call_number,
-                    "turn": len(conversation_logs),
-                    "type": "system",
-                    "content": f"Conversation timeout reached after {timeout_seconds} seconds",
-                    "timestamp": datetime.utcnow().isoformat()
-                })
+                logger.info(
+                    f"[Call {call_number}] Conversation timeout reached ({timeout_seconds}s)"
+                )
+                conversation_logs.append(
+                    {
+                        "call_number": call_number,
+                        "turn": len(conversation_logs),
+                        "type": "system",
+                        "content": f"Conversation timeout reached after {timeout_seconds} seconds",
+                        "timestamp": datetime.utcnow().isoformat(),
+                    }
+                )
                 # Timeout means conversation completed (just took too long), not failed
                 # Set error_message to indicate timeout but continue with normal processing
                 error_message = f"Conversation timeout after {timeout_seconds} seconds"
@@ -846,7 +923,7 @@ class TestExecutionService:
                     "combined_audio_bytes": 0,
                     "error_message": error_message,
                     "call_number": call_number,
-                    "success": False
+                    "success": False,
                 }
 
             conv_duration = time.time() - conv_start_time
@@ -860,14 +937,16 @@ class TestExecutionService:
             return {
                 "conversation_logs": conversation_logs,
                 "audio_data": audio_data,
-                "pcm_frames": bytes(isolated_pcm_frames),  # Return PCM frames for individual WAV creation
+                "pcm_frames": bytes(
+                    isolated_pcm_frames
+                ),  # Return PCM frames for individual WAV creation
                 "combined_audio_bytes": len(audio_data),
                 "audio_format": "mulaw 8kHz",
                 "duration_seconds": conv_duration,
                 "call_number": call_number,
                 "request_id": request_id,  # Store request_id for fetching transcript from Pranthora
-                "error_message": error_message if 'error_message' in locals() else None,
-                "success": True
+                "error_message": error_message if "error_message" in locals() else None,
+                "success": True,
             }
 
         except Exception as e:
@@ -879,7 +958,7 @@ class TestExecutionService:
                 "combined_audio_bytes": 0,
                 "error_message": str(e),
                 "call_number": call_number,
-                "success": False
+                "success": False,
             }
 
     async def _connect_target_agent(
@@ -890,7 +969,8 @@ class TestExecutionService:
         incoming_queue: asyncio.Queue,
         stop_event: asyncio.Event,
         record_callback: callable,
-        conversation_logs: List[Dict[str, Any]]
+        conversation_logs: List[Dict[str, Any]],
+        record_sent_callback: Optional[callable] = None,
     ):
         """Connect to target agent websocket (media-stream endpoint)."""
         logger.info(f"[Target] Connecting to {ws_url}")
@@ -906,15 +986,25 @@ class TestExecutionService:
                         "callSid": call_sid,
                         "streamSid": f"stream_{call_sid}",
                         "tracks": ["inbound"],
-                        "customParameters": {}
+                        "customParameters": {},
                     },
-                    "streamSid": f"stream_{call_sid}"
+                    "streamSid": f"stream_{call_sid}",
                 }
                 await websocket.send(json.dumps(start_event))
-                logger.info(f"[Target] Sent start event")
+                logger.info("[Target] Sent start event")
+
+                # State tracking for speaking detection - only logs on state changes
+                target_speaking = False
+                user_speaking = False
+                last_target_audio_time = None
+                last_user_audio_time = None
+                last_target_stop_time = None
+                last_user_stop_time = None
+                silence_timeout = 0.3  # 300ms of no audio = stopped speaking
 
                 # Read from target agent
                 async def read_from_ws():
+                    nonlocal target_speaking, last_target_audio_time, last_target_stop_time
                     try:
                         async for message in websocket:
                             if stop_event.is_set():
@@ -927,8 +1017,17 @@ class TestExecutionService:
                                 payload = data["media"]["payload"]
                                 audio_bytes = base64.b64decode(payload)
 
-                                # Record audio from target agent
-                                record_callback(audio_bytes)
+                                current_time = time.time()
+
+                                # Only log when transitioning from not-speaking to speaking
+                                if not target_speaking:
+                                    gap = ""
+                                    if last_target_stop_time is not None:
+                                        gap = f" (gap: {current_time - last_target_stop_time:.3f}s)"
+                                    logger.info(f"[Target] Started speaking{gap}")
+                                    target_speaking = True
+
+                                last_target_audio_time = current_time
 
                                 # Send to user agent
                                 await outgoing_queue.put(audio_bytes)
@@ -936,7 +1035,7 @@ class TestExecutionService:
                             elif event_type == "mark":
                                 logger.info(f"[Target] Mark: {data.get('mark', {}).get('name')}")
                             elif event_type == "clear":
-                                logger.info(f"[Target] Clear received")
+                                logger.info("[Target] Clear received")
                                 # Clear incoming queue
                                 while not incoming_queue.empty():
                                     try:
@@ -944,65 +1043,131 @@ class TestExecutionService:
                                     except asyncio.QueueEmpty:
                                         break
                             elif event_type == "stop":
-                                logger.info(f"[Target] Stop received")
+                                logger.info("[Target] Stop received")
                                 break
                     except Exception as e:
                         logger.error(f"[Target] Read error: {e}")
 
-                # Write to target agent (20ms cadence)
+                # Monitor for target agent stopping (silence detection) - only logs on transition
+                async def monitor_target_silence():
+                    nonlocal target_speaking, last_target_audio_time, last_target_stop_time
+                    while not stop_event.is_set():
+                        await asyncio.sleep(0.1)  # Check every 100ms
+                        if target_speaking and last_target_audio_time:
+                            current_time = time.time()
+                            if current_time - last_target_audio_time > silence_timeout:
+                                # Only log when transitioning from speaking to not-speaking
+                                logger.info("[Target] Stopped speaking")
+                                target_speaking = False
+                                last_target_stop_time = current_time
+                                last_target_audio_time = None  # Reset to prevent re-triggering
+
+                # Write to target agent
                 async def write_to_ws():
+                    nonlocal user_speaking, last_user_audio_time, last_user_stop_time
                     stream_sid = f"stream_{call_sid}"
                     next_tick = time.time()
 
                     try:
                         while not stop_event.is_set():
-                            # Maintain 20ms cadence
-                            next_tick += 0.02
+                            # Maintain configurable cadence
+                            next_tick += self.chunk_duration_seconds
                             sleep_time = next_tick - time.time()
                             if sleep_time > 0:
                                 await asyncio.sleep(sleep_time)
 
                             payload_to_send = None
 
-                            # Check for audio from user agent
-                            if not incoming_queue.empty():
-                                try:
-                                    audio_data = incoming_queue.get_nowait()
-                                    payload_to_send = base64.b64encode(audio_data).decode('utf-8')
-                                except asyncio.QueueEmpty:
-                                    pass
+                            # Try to get audio from user agent with small timeout to avoid race condition
+                            try:
+                                audio_data = await asyncio.wait_for(
+                                    incoming_queue.get(), timeout=0.001
+                                )
+
+                                # Record what we send to target agent (user's audio)
+                                if record_sent_callback:
+                                    record_sent_callback(audio_data)
+
+                                payload_to_send = base64.b64encode(audio_data).decode("utf-8")
+
+                                current_time = time.time()
+
+                                # Only log when transitioning from not-speaking to speaking
+                                if not user_speaking:
+                                    gap = ""
+                                    if last_user_stop_time is not None:
+                                        gap = f" (gap: {current_time - last_user_stop_time:.3f}s)"
+                                    logger.info(f"[User] Started speaking{gap}")
+                                    user_speaking = True
+
+                                last_user_audio_time = current_time
+
+                            except asyncio.TimeoutError:
+                                # No chunk arrived within timeout, will send silence
+                                pass
+                            except Exception as queue_error:
+                                logger.warning(
+                                    f"[Target] Queue access error: {queue_error}, sending silence"
+                                )
+                                payload_to_send = None
 
                             # Send silence if no audio
                             if not payload_to_send:
-                                silence = b"\xff" * 160  # μ-law silence
-                                payload_to_send = base64.b64encode(silence).decode('utf-8')
+                                chunk_size = int(8000 * self.chunk_duration_seconds)  # 8kHz
+                                silence = b"\xff" * chunk_size  # μ-law silence
 
-                            # Send media event
-                            media_event = {
-                                "event": "media",
-                                "streamSid": stream_sid,
-                                "media": {
-                                    "payload": payload_to_send
+                                # Record silence we send to target agent
+                                if record_sent_callback:
+                                    record_sent_callback(silence)
+
+                                payload_to_send = base64.b64encode(silence).decode("utf-8")
+
+                            # Send media event with error handling
+                            try:
+                                media_event = {
+                                    "event": "media",
+                                    "streamSid": stream_sid,
+                                    "media": {"payload": payload_to_send},
                                 }
-                            }
-                            await websocket.send(json.dumps(media_event))
+                                await websocket.send(json.dumps(media_event))
+                            except (ConnectionClosedOK, ConnectionClosedError):
+                                logger.info("[Target] WebSocket connection closed during write")
+                                break
+                            except Exception as send_error:
+                                logger.warning(f"[Target] Send error (continuing): {send_error}")
 
                     except asyncio.CancelledError:
-                        pass
-                    except (ConnectionClosedOK, ConnectionClosedError):
-                        # Normal websocket closure or clean disconnect - not an error
-                        logger.debug(f"[Target] WebSocket closed normally")
                         pass
                     except Exception as e:
                         logger.error(f"[Target] Write error: {e}")
 
+                # Monitor for user agent stopping (silence detection) - only logs on transition
+                async def monitor_user_silence():
+                    nonlocal user_speaking, last_user_audio_time, last_user_stop_time
+                    while not stop_event.is_set():
+                        await asyncio.sleep(0.1)  # Check every 100ms
+                        if user_speaking and last_user_audio_time:
+                            current_time = time.time()
+                            if current_time - last_user_audio_time > silence_timeout:
+                                # Only log when transitioning from speaking to not-speaking
+                                logger.info("[User] Stopped speaking")
+                                user_speaking = False
+                                last_user_stop_time = current_time
+                                last_user_audio_time = None  # Reset to prevent re-triggering
+
                 reader_task = asyncio.create_task(read_from_ws())
                 writer_task = asyncio.create_task(write_to_ws())
+                target_silence_task = asyncio.create_task(monitor_target_silence())
+                user_silence_task = asyncio.create_task(monitor_user_silence())
 
                 await reader_task
                 writer_task.cancel()
+                target_silence_task.cancel()
+                user_silence_task.cancel()
                 try:
                     await writer_task
+                    await target_silence_task
+                    await user_silence_task
                 except asyncio.CancelledError:
                     pass
 
@@ -1019,7 +1184,8 @@ class TestExecutionService:
         stop_event: asyncio.Event,
         record_callback: callable,
         conversation_logs: List[Dict[str, Any]],
-        request_id: Optional[str] = None
+        request_id: Optional[str] = None,
+        record_sent_callback: Optional[callable] = None,
     ):
         """Connect to user agent websocket (media-stream endpoint)."""
         logger.info(f"[User] Connecting to {ws_url}")
@@ -1031,7 +1197,9 @@ class TestExecutionService:
             logger.info(f"[User] Request ID: {request_id}")
 
         try:
-            async with websockets.connect(ws_url, additional_headers=additional_headers) as websocket:
+            async with websockets.connect(
+                ws_url, additional_headers=additional_headers
+            ) as websocket:
                 # Send start event (Twilio-style)
                 start_event = {
                     "event": "start",
@@ -1046,10 +1214,20 @@ class TestExecutionService:
                     "streamSid": f"stream_{call_sid}",
                 }
                 await websocket.send(json.dumps(start_event))
-                logger.info(f"[User] Sent start event")
+                logger.info("[User] Sent start event")
+
+                # State tracking for speaking detection - only logs on state changes
+                user_speaking = False
+                target_speaking = False
+                last_user_audio_time = None
+                last_target_audio_time = None
+                last_user_stop_time = None
+                last_target_stop_time = None
+                silence_timeout = 0.3  # 300ms of no audio = stopped speaking
 
                 # Read from user agent (JSON messages)
                 async def read_from_ws():
+                    nonlocal user_speaking, last_user_audio_time, last_user_stop_time
                     try:
                         async for message in websocket:
                             if stop_event.is_set():
@@ -1062,8 +1240,17 @@ class TestExecutionService:
                                 payload = data["media"]["payload"]
                                 audio_bytes = base64.b64decode(payload)
 
-                                # Record audio from user agent
-                                record_callback(audio_bytes)
+                                current_time = time.time()
+
+                                # Only log when transitioning from not-speaking to speaking
+                                if not user_speaking:
+                                    gap = ""
+                                    if last_user_stop_time is not None:
+                                        gap = f" (gap: {current_time - last_user_stop_time:.3f}s)"
+                                    logger.info(f"[User] Started speaking{gap}")
+                                    user_speaking = True
+
+                                last_user_audio_time = current_time
 
                                 # Send to target agent
                                 await outgoing_queue.put(audio_bytes)
@@ -1071,7 +1258,7 @@ class TestExecutionService:
                             elif event_type == "mark":
                                 logger.info(f"[User] Mark: {data.get('mark', {}).get('name')}")
                             elif event_type == "clear":
-                                logger.info(f"[User] Clear received")
+                                logger.info("[User] Clear received")
                                 # Clear incoming queue
                                 while not incoming_queue.empty():
                                     try:
@@ -1079,65 +1266,135 @@ class TestExecutionService:
                                     except asyncio.QueueEmpty:
                                         break
                             elif event_type == "stop":
-                                logger.info(f"[User] Stop received")
+                                logger.info("[User] Stop received")
                                 break
                     except Exception as e:
                         logger.error(f"[User] Read error: {e}")
 
-                # Write to user agent (20ms cadence, JSON media events)
+                # Monitor for user agent stopping (silence detection) - only logs on transition
+                async def monitor_user_silence():
+                    nonlocal user_speaking, last_user_audio_time, last_user_stop_time
+                    while not stop_event.is_set():
+                        await asyncio.sleep(0.1)  # Check every 100ms
+                        if user_speaking and last_user_audio_time:
+                            current_time = time.time()
+                            if current_time - last_user_audio_time > silence_timeout:
+                                # Only log when transitioning from speaking to not-speaking
+                                logger.info("[User] Stopped speaking")
+                                user_speaking = False
+                                last_user_stop_time = current_time
+                                last_user_audio_time = None  # Reset to prevent re-triggering
+
+                # Write to user agent (JSON media events)
                 async def write_to_ws():
+                    nonlocal target_speaking, last_target_audio_time, last_target_stop_time
                     stream_sid = f"stream_{call_sid}"
                     next_tick = time.time()
 
                     try:
                         while not stop_event.is_set():
-                            # Maintain 20ms cadence
-                            next_tick += 0.02
+                            # Maintain configurable cadence
+                            next_tick += self.chunk_duration_seconds
                             sleep_time = next_tick - time.time()
                             if sleep_time > 0:
                                 await asyncio.sleep(sleep_time)
 
                             payload_to_send = None
 
-                            # Check for audio from target agent
-                            if not incoming_queue.empty():
-                                try:
-                                    audio_data = incoming_queue.get_nowait()
-                                    payload_to_send = base64.b64encode(audio_data).decode('utf-8')
-                                except asyncio.QueueEmpty:
-                                    pass
+                            # Try to get audio from target agent with small timeout to avoid race condition
+                            try:
+                                audio_data = await asyncio.wait_for(
+                                    incoming_queue.get(), timeout=0.001
+                                )
+
+                                # Record what we send to user agent (target's audio)
+                                if record_sent_callback:
+                                    record_sent_callback(audio_data)
+
+                                payload_to_send = base64.b64encode(audio_data).decode("utf-8")
+
+                                current_time = time.time()
+
+                                # Only log when transitioning from not-speaking to speaking
+                                if not target_speaking:
+                                    gap = ""
+                                    if last_target_stop_time is not None:
+                                        gap = f" (gap: {current_time - last_target_stop_time:.3f}s)"
+                                    logger.info(f"[Target] Started speaking{gap}")
+                                    target_speaking = True
+
+                                last_target_audio_time = current_time
+
+                            except asyncio.TimeoutError:
+                                # No chunk arrived within timeout, will send silence
+                                pass
+                            except Exception as queue_error:
+                                logger.warning(
+                                    f"[User] Queue access error: {queue_error}, sending silence"
+                                )
+                                payload_to_send = None
 
                             # Send silence if no audio
                             if not payload_to_send:
-                                silence = b"\xff" * 160  # μ-law silence
-                                payload_to_send = base64.b64encode(silence).decode('utf-8')
+                                chunk_size = int(8000 * self.chunk_duration_seconds)  # 8kHz
+                                silence = b"\xff" * chunk_size  # μ-law silence
 
-                            # Send media event
-                            media_event = {
-                                "event": "media",
-                                "streamSid": stream_sid,
-                                "media": {
-                                    "payload": payload_to_send
+                                # Record silence we send to user agent
+                                if record_sent_callback:
+                                    record_sent_callback(silence)
+
+                                payload_to_send = base64.b64encode(silence).decode("utf-8")
+
+                            # Send media event with error handling
+                            try:
+                                media_event = {
+                                    "event": "media",
+                                    "streamSid": stream_sid,
+                                    "media": {"payload": payload_to_send},
                                 }
-                            }
-                            await websocket.send(json.dumps(media_event))
+                                await websocket.send(json.dumps(media_event))
+                            except (ConnectionClosedOK, ConnectionClosedError):
+                                logger.info("[User] WebSocket connection closed during write")
+                                break
+                            except Exception as send_error:
+                                logger.warning(f"[User] Send error (continuing): {send_error}")
 
                     except asyncio.CancelledError:
                         pass
                     except (ConnectionClosedOK, ConnectionClosedError):
                         # Normal websocket closure or clean disconnect - not an error
-                        logger.debug(f"[User] WebSocket closed normally")
+                        logger.debug("[User] WebSocket closed normally")
                         pass
                     except Exception as e:
                         logger.error(f"[User] Write error: {e}")
 
+                # Monitor for target agent stopping (silence detection) - only logs on transition
+                async def monitor_target_silence():
+                    nonlocal target_speaking, last_target_audio_time, last_target_stop_time
+                    while not stop_event.is_set():
+                        await asyncio.sleep(0.1)  # Check every 100ms
+                        if target_speaking and last_target_audio_time:
+                            current_time = time.time()
+                            if current_time - last_target_audio_time > silence_timeout:
+                                # Only log when transitioning from speaking to not-speaking
+                                logger.info("[Target] Stopped speaking")
+                                target_speaking = False
+                                last_target_stop_time = current_time
+                                last_target_audio_time = None  # Reset to prevent re-triggering
+
                 reader_task = asyncio.create_task(read_from_ws())
                 writer_task = asyncio.create_task(write_to_ws())
+                user_silence_task = asyncio.create_task(monitor_user_silence())
+                target_silence_task = asyncio.create_task(monitor_target_silence())
 
                 await reader_task
                 writer_task.cancel()
+                user_silence_task.cancel()
+                target_silence_task.cancel()
                 try:
                     await writer_task
+                    await user_silence_task
+                    await target_silence_task
                 except asyncio.CancelledError:
                     pass
 
@@ -1151,7 +1408,7 @@ class TestExecutionService:
         conversation_result: Dict[str, Any],
         user_agent,
         test_run_id: UUID,
-        result_id: UUID
+        result_id: UUID,
     ):
         """Sequential evaluation with retry logic for fetching transcripts."""
         try:
@@ -1159,54 +1416,62 @@ class TestExecutionService:
             if not request_ids:
                 logger.warning(f"No request_ids found for test case {test_case.id}")
                 # Update status to failed if no request_ids
-                await self.test_result_service.update(result_id, {
-                    "status": "failed",
-                    "error_message": "No request_ids found for transcript fetching"
-                })
+                await self.test_result_service.update(
+                    result_id,
+                    {
+                        "status": "failed",
+                        "error_message": "No request_ids found for transcript fetching",
+                    },
+                )
                 return None
 
             # Fetch transcript with more retries (10 retries, 5 second delay = up to 50 seconds wait)
-            transcript = await self._fetch_transcript_with_retry(request_ids, max_retries=10, retry_delay=5)
-            
+            transcript = await self._fetch_transcript_with_retry(
+                request_ids, max_retries=10, retry_delay=5
+            )
+
             if not transcript:
                 # All retries exhausted, update status to failed
-                logger.error(f"Failed to fetch transcript after all retries for test case {test_case.id}")
-                await self.test_result_service.update(result_id, {
-                    "status": "failed",
-                    "error_message": "Failed to fetch transcript after all retries"
-                })
+                logger.error(
+                    f"Failed to fetch transcript after all retries for test case {test_case.id}"
+                )
+                await self.test_result_service.update(
+                    result_id,
+                    {
+                        "status": "failed",
+                        "error_message": "Failed to fetch transcript after all retries",
+                    },
+                )
                 return None
-            
+
             # Run evaluation
-            evaluation_result = await self._run_evaluation(
-                test_case, transcript, user_agent
-            )
-            
+            evaluation_result = await self._run_evaluation(test_case, transcript, user_agent)
+
             # Update evaluation result
             await self._update_test_case_result_with_evaluation(
                 test_run_id, test_case.id, evaluation_result
             )
-            
+
             # Determine final status based on evaluation
             final_status = self._determine_test_status(evaluation_result)
-            
+
             # Update status to complete (pass/alert/fail based on evaluation)
-            await self.test_result_service.update(result_id, {
-                "status": final_status,
-                "evaluation_result": evaluation_result
-            })
-            
-            logger.info(f"Evaluation completed for test case {test_case.id} with status: {final_status}")
+            await self.test_result_service.update(
+                result_id, {"status": final_status, "evaluation_result": evaluation_result}
+            )
+
+            logger.info(
+                f"Evaluation completed for test case {test_case.id} with status: {final_status}"
+            )
             return evaluation_result
-            
+
         except Exception as e:
             logger.error(f"Sequential evaluation error: {e}", exc_info=True)
             # Update status to failed on exception
             try:
-                await self.test_result_service.update(result_id, {
-                    "status": "failed",
-                    "error_message": f"Evaluation error: {str(e)}"
-                })
+                await self.test_result_service.update(
+                    result_id, {"status": "failed", "error_message": f"Evaluation error: {str(e)}"}
+                )
             except Exception as update_error:
                 logger.error(f"Failed to update status after evaluation error: {update_error}")
             return None
@@ -1230,31 +1495,45 @@ class TestExecutionService:
             for attempt in range(max_retries + 1):
                 try:
                     if attempt > 0:
-                        logger.info(f"Retry {attempt}/{max_retries} for request_id {request_id} (waiting {retry_delay}s)")
+                        logger.info(
+                            f"Retry {attempt}/{max_retries} for request_id {request_id} (waiting {retry_delay}s)"
+                        )
                         await asyncio.sleep(retry_delay)
                     else:
                         logger.info(f"Fetching transcript for request_id: {request_id}")
-                    
+
                     call_logs = await self.pranthora_client.get_call_logs(request_id)
                     if call_logs and call_logs.get("call_transcript"):
                         transcript.extend(self._parse_transcript(call_logs["call_transcript"]))
-                        logger.info(f"✅ Successfully fetched {len(call_logs['call_transcript'])} messages for request_id: {request_id}")
+                        logger.info(
+                            f"✅ Successfully fetched {len(call_logs['call_transcript'])} messages for request_id: {request_id}"
+                        )
                         fetched = True
                         break
                     elif call_logs:
-                        logger.warning(f"Call logs found for {request_id} but no transcript available")
+                        logger.warning(
+                            f"Call logs found for {request_id} but no transcript available"
+                        )
                     else:
-                        logger.debug(f"Call logs not found for request_id {request_id} (attempt {attempt + 1}/{max_retries + 1})")
-                        
+                        logger.debug(
+                            f"Call logs not found for request_id {request_id} (attempt {attempt + 1}/{max_retries + 1})"
+                        )
+
                 except Exception as e:
                     if attempt < max_retries:
-                        logger.warning(f"Error fetching transcript for {request_id} (attempt {attempt + 1}/{max_retries + 1}): {e}")
+                        logger.warning(
+                            f"Error fetching transcript for {request_id} (attempt {attempt + 1}/{max_retries + 1}): {e}"
+                        )
                     else:
-                        logger.error(f"Failed to fetch transcript for {request_id} after {max_retries + 1} attempts: {e}")
-            
+                        logger.error(
+                            f"Failed to fetch transcript for {request_id} after {max_retries + 1} attempts: {e}"
+                        )
+
             if not fetched:
-                logger.error(f"❌ Failed to fetch transcript for request_id {request_id} after all {max_retries + 1} attempts")
-        
+                logger.error(
+                    f"❌ Failed to fetch transcript for request_id {request_id} after all {max_retries + 1} attempts"
+                )
+
         return transcript
 
     def _parse_transcript(self, call_transcript: List[Any]) -> List[Dict[str, Any]]:
@@ -1265,11 +1544,11 @@ class TestExecutionService:
                 role = self._normalize_role(msg.get("role", "unknown"))
                 content = msg.get("content", msg.get("message", ""))
                 if content:
-                    parsed.append(TranscriptMessage(
-                        role=role,
-                        content=content,
-                        timestamp=msg.get("timestamp", "")
-                    ).model_dump())
+                    parsed.append(
+                        TranscriptMessage(
+                            role=role, content=content, timestamp=msg.get("timestamp", "")
+                        ).model_dump()
+                    )
         return parsed
 
     def _normalize_role(self, role: Any) -> str:
@@ -1291,7 +1570,7 @@ class TestExecutionService:
                 goals=test_case.goals or [],
                 evaluation_criteria=test_case.evaluation_criteria or [],
                 test_case_name=test_case.name,
-                max_retries=2
+                max_retries=2,
             )
         except Exception as e:
             logger.error(f"Evaluation error: {e}", exc_info=True)
@@ -1300,7 +1579,7 @@ class TestExecutionService:
                 "overall_score": 0.0,
                 "overall_status": "failed",
                 "summary": f"Evaluation failed: {str(e)}",
-                "timestamp": time.time()
+                "timestamp": time.time(),
             }
 
     async def _update_test_case_result_with_evaluation(
@@ -1342,12 +1621,7 @@ class TestExecutionService:
             return "fail"
 
     async def _update_test_run_status(
-        self,
-        test_run_id: UUID,
-        status: str,
-        passed_count: int,
-        failed_count: int,
-        alert_count: int
+        self, test_run_id: UUID, status: str, passed_count: int, failed_count: int, alert_count: int
     ):
         """Update the test run status and statistics."""
         try:
@@ -1355,7 +1629,7 @@ class TestExecutionService:
                 "status": status,
                 "passed_count": passed_count,
                 "failed_count": failed_count,
-                "alert_count": alert_count
+                "alert_count": alert_count,
             }
 
             if status in ["completed", "failed"]:
