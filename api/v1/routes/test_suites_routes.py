@@ -1,325 +1,173 @@
 """
-Test suite routes for scaled WebSocket testing.
+Test suites CRUD API routes.
 
-This module provides endpoints for running concurrent WebSocket tests
-with audio conversion support.
+This module provides REST API endpoints for managing test suites.
 """
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from typing import List, Optional
+from uuid import UUID
 
-from models.api import ScaledTestRequest, ScaledTestResponse, WebScaledTestRequest, WebScaledTestResponse
-from services.scaled_testing_service import ScaledTestingService
-from services.web_scaled_testing_service import WebScaledTestingService
+from fastapi import APIRouter, HTTPException, Query, Depends
+from pydantic import BaseModel
+
+from models.test_suite_models import (
+    TestSuiteCreate, TestSuiteCreateRequest, TestSuiteUpdate, TestSuite, TestSuiteWithRelations
+)
+from services.test_suite_service import TestSuiteService
 from telemetrics.logger import logger
 
-router = APIRouter(tags=["Scaled Tests"])
-
-# Store active test sessions
-active_tests: dict[str, ScaledTestingService] = {}
-active_web_tests: dict[str, WebScaledTestingService] = {}
+router = APIRouter(prefix="/test-suites", tags=["Test Suites"])
 
 
-@router.post("/twilio-test", response_model=ScaledTestResponse)
-async def start_scaled_test(
-    request: ScaledTestRequest,
-    background_tasks: BackgroundTasks,
+# Dependency to get test suite service
+async def get_test_suite_service() -> TestSuiteService:
+    """Dependency to get test suite service instance."""
+    service = TestSuiteService()
+    try:
+        yield service
+    finally:
+        await service.close()
+
+
+class TestSuiteListResponse(BaseModel):
+    """Response for listing test suites."""
+    test_suites: List[TestSuite]
+    total: int
+    limit: int
+    offset: int
+
+
+@router.post("", response_model=TestSuite)
+async def create_test_suite(
+    data: TestSuiteCreateRequest,
+    user_id: Optional[UUID] = Query(None, description="User ID (can also be in request body)"),
+    service: TestSuiteService = Depends(get_test_suite_service),
 ):
-    """
-    Start a scaled WebSocket test with concurrent connections.
+    """Create a new test suite.
 
-    This endpoint creates multiple parallel WebSocket connections between
-    target and user agents, with audio conversion support based on the
-    specified encoding and sample rate.
-
-    Args:
-        request: Test configuration including agent URIs, concurrency, timeout, etc.
-        background_tasks: FastAPI background tasks for async execution
-
-    Returns:
-        Response with test ID and initial status
+    User ID can be provided either in the request body or as a query parameter.
+    Allows creating test suites with just name and description (target_agent_id and user_agent_id are optional).
     """
     try:
-        # Validate inputs
-        if request.concurrent_requests < 1:
-            raise HTTPException(
-                status_code=400, detail="concurrent_requests must be at least 1"
-            )
-        if request.timeout < 1:
-            raise HTTPException(
-                status_code=400, detail="timeout must be at least 1 second"
-            )
-        if request.sample_rate < 1000 or request.sample_rate > 48000:
-            raise HTTPException(
-                status_code=400,
-                detail="sample_rate must be between 1000 and 48000 Hz",
-            )
+        # Use user_id from query param if provided, otherwise from body
+        actual_user_id = user_id if user_id is not None else data.user_id
 
-        valid_encodings = ["mulaw", "pcm16", "pcm"]
-        if request.encoding.lower() not in valid_encodings:
-            raise HTTPException(
-                status_code=400,
-                detail=f"encoding must be one of: {', '.join(valid_encodings)}",
-            )
+        if actual_user_id is None:
+            raise HTTPException(status_code=400, detail="user_id is required (in body or as query parameter)")
 
-        # Create test service
-        test_service = ScaledTestingService(
-            target_agent_uri=request.target_agent_uri,
-            user_agent_uri=request.user_agent_uri,
-            sample_rate=request.sample_rate,
-            encoding=request.encoding,
-            recording_path="test_suite_recordings",
+        # Create the full TestSuiteCreate object
+        suite_data = TestSuiteCreate(
+            user_id=actual_user_id,
+            name=data.name,
+            description=data.description,
+            target_agent_id=data.target_agent_id,
+            user_agent_id=data.user_agent_id
         )
 
-        # Generate test ID
-        import uuid
-
-        test_id = str(uuid.uuid4())
-
-        # Store active test
-        active_tests[test_id] = test_service
-
-        # Run test in background
-        background_tasks.add_task(_run_test_async, test_service, test_id, request)
-
-        logger.info(
-            f"Started scaled test: {test_id}, "
-            f"{request.concurrent_requests} concurrent connections, "
-            f"timeout: {request.timeout}s"
-        )
-
-        return ScaledTestResponse(
-            success=True,
-            test_id=test_id,
-            message=f"Scaled test started with {request.concurrent_requests} concurrent connections",
-            status={
-                "test_id": test_id,
-                "concurrent_requests": request.concurrent_requests,
-                "timeout": request.timeout,
-                "target_agent_uri": request.target_agent_uri,
-                "user_agent_uri": request.user_agent_uri,
-                "sample_rate": request.sample_rate,
-                "encoding": request.encoding,
-                "status": "running",
-            },
-        )
-
+        suite_id = await service.create_test_suite(actual_user_id, suite_data)
+        suite = await service.get_test_suite(suite_id)
+        if not suite:
+            raise HTTPException(status_code=500, detail="Failed to retrieve created test suite")
+        return suite
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error starting scaled test: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to start test: {str(e)}")
+        logger.error(f"Error creating test suite: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create test suite: {str(e)}")
 
 
-async def _run_test_async(
-    test_service: ScaledTestingService,
-    test_id: str,
-    request: ScaledTestRequest,
+@router.get("/{suite_id}", response_model=TestSuite)
+async def get_test_suite(
+    suite_id: UUID,
+    service: TestSuiteService = Depends(get_test_suite_service),
 ):
-    """Run the test asynchronously and store results."""
+    """Get a test suite by ID."""
+    suite = await service.get_test_suite(suite_id)
+    if not suite:
+        raise HTTPException(status_code=404, detail=f"Test suite '{suite_id}' not found")
+    return suite
+
+
+@router.get("/{suite_id}/details", response_model=TestSuiteWithRelations)
+async def get_test_suite_with_relations(
+    suite_id: UUID,
+    service: TestSuiteService = Depends(get_test_suite_service),
+):
+    """Get a test suite with all related entities (agents, test cases)."""
+    suite = await service.get_test_suite_with_relations(suite_id)
+    if not suite:
+        raise HTTPException(status_code=404, detail=f"Test suite '{suite_id}' not found")
+    return suite
+
+
+@router.get("", response_model=TestSuiteListResponse)
+async def list_test_suites(
+    user_id: UUID = Query(..., description="User ID to filter test suites"),
+    limit: int = Query(100, ge=1, le=1000, description="Number of items to return"),
+    offset: int = Query(0, ge=0, description="Number of items to skip"),
+    service: TestSuiteService = Depends(get_test_suite_service),
+):
+    """List test suites for a user."""
     try:
-        result = await test_service.run_concurrent_test(
-            concurrent_requests=request.concurrent_requests,
-            timeout=request.timeout,
-            test_id=test_id,
+        test_suites = await service.get_test_suites_by_user(user_id, limit, offset)
+        total = await service.get_test_suite_count(user_id)
+        return TestSuiteListResponse(
+            test_suites=test_suites,
+            total=total,
+            limit=limit,
+            offset=offset
         )
-        logger.info(f"Test {test_id} completed: {result}")
     except Exception as e:
-        logger.error(f"Error running test {test_id}: {e}")
-    finally:
-        # Remove from active tests after completion
-        if test_id in active_tests:
-            del active_tests[test_id]
+        logger.error(f"Error listing test suites: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to list test suites: {str(e)}")
 
 
-@router.get("/twilio-test/{test_id}")
-async def get_test_status(test_id: str):
-    """
-    Get the status of a running or completed test.
-
-    Args:
-        test_id: Unique test identifier
-
-    Returns:
-        Test status information
-    """
-    if test_id not in active_tests:
-        raise HTTPException(status_code=404, detail=f"Test '{test_id}' not found")
-
-    return {
-        "test_id": test_id,
-        "status": "running",
-        "message": "Test is currently running",
-    }
-
-
-@router.get("/twilio-tests")
-async def list_tests():
-    """List all active twilio tests."""
-    return {
-        "total": len(active_tests),
-        "active_tests": list(active_tests.keys()),
-    }
-
-
-@router.get("/web-test/{test_id}")
-async def get_web_test_status(test_id: str):
-    """
-    Get the status of a running or completed web test.
-
-    Args:
-        test_id: Unique test identifier
-
-    Returns:
-        Test status information
-    """
-    if test_id not in active_web_tests:
-        raise HTTPException(status_code=404, detail=f"Web test '{test_id}' not found")
-
-    return {
-        "test_id": test_id,
-        "status": "running",
-        "message": "Web test is currently running",
-    }
-
-
-@router.get("/web-tests")
-async def list_web_tests():
-    """List all active web tests."""
-    return {
-        "total": len(active_web_tests),
-        "active_tests": list(active_web_tests.keys()),
-    }
-
-
-@router.delete("/twilio-test/{test_id}")
-async def delete_test(test_id: str):
-    """
-    Delete a twilio test (stops if running).
-
-    Args:
-        test_id: Unique test identifier
-
-    Returns:
-        Success confirmation
-    """
-    if test_id not in active_tests:
-        raise HTTPException(status_code=404, detail=f"Test '{test_id}' not found")
-
-    del active_tests[test_id]
-    return {"success": True, "message": f"Test '{test_id}' deleted"}
-
-
-@router.delete("/web-test/{test_id}")
-async def delete_web_test(test_id: str):
-    """
-    Delete a web test (stops if running).
-
-    Args:
-        test_id: Unique test identifier
-
-    Returns:
-        Success confirmation
-    """
-    if test_id not in active_web_tests:
-        raise HTTPException(status_code=404, detail=f"Web test '{test_id}' not found")
-
-    del active_web_tests[test_id]
-    return {"success": True, "message": f"Web test '{test_id}' deleted"}
-
-
-@router.post("/web-test", response_model=WebScaledTestResponse)
-async def start_web_scaled_test(
-    request: WebScaledTestRequest,
-    background_tasks: BackgroundTasks,
+@router.put("/{suite_id}", response_model=TestSuite)
+async def update_test_suite(
+    suite_id: UUID,
+    data: TestSuiteUpdate,
+    service: TestSuiteService = Depends(get_test_suite_service),
 ):
-    """
-    Start a scaled WebSocket test with concurrent connections.
+    """Update a test suite."""
+    # Check if suite exists
+    existing_suite = await service.get_test_suite(suite_id)
+    if not existing_suite:
+        raise HTTPException(status_code=404, detail=f"Test suite '{suite_id}' not found")
 
-    This endpoint creates multiple parallel WebSocket connections between
-    target agent (media-stream endpoint, 8k mulaw) and user agent
-    (web-media-stream endpoint, 16k PCM). Uses the exact same logic as test.py.
-
-    Args:
-        request: Test configuration including agent URIs, concurrency, timeout, etc.
-        background_tasks: FastAPI background tasks for async execution
-
-    Returns:
-        Response with test ID and initial status
-    """
     try:
-        # Validate inputs
-        if request.concurrent_requests < 1:
-            raise HTTPException(
-                status_code=400, detail="concurrent_requests must be at least 1"
-            )
-        if request.timeout < 1:
-            raise HTTPException(
-                status_code=400, detail="timeout must be at least 1 second"
-            )
+        success = await service.update_test_suite(suite_id, data)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to update test suite")
 
-        # Create test service
-        test_service = WebScaledTestingService(
-            target_agent_uri=request.target_agent_uri,
-            user_agent_id=request.user_agent_id,
-            ws_url_base=request.ws_url_base,
-            recording_path="test_suite_recordings",
-        )
-
-        # Generate test ID
-        import uuid
-
-        test_id = str(uuid.uuid4())
-
-        # Store active test
-        active_web_tests[test_id] = test_service
-
-        # Run test in background
-        background_tasks.add_task(_run_web_test_async, test_service, test_id, request)
-
-        logger.info(
-            f"Started web scaled test: {test_id}, "
-            f"{request.concurrent_requests} concurrent connections, "
-            f"timeout: {request.timeout}s"
-        )
-
-        return WebScaledTestResponse(
-            success=True,
-            test_id=test_id,
-            message=f"Web scaled test started with {request.concurrent_requests} concurrent connections",
-            status={
-                "test_id": test_id,
-                "concurrent_requests": request.concurrent_requests,
-                "timeout": request.timeout,
-                "target_agent_uri": request.target_agent_uri,
-                "user_agent_id": request.user_agent_id,
-                "ws_url_base": request.ws_url_base,
-                "status": "running",
-            },
-        )
-
+        # Return updated suite
+        updated_suite = await service.get_test_suite(suite_id)
+        return updated_suite
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error starting web scaled test: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to start test: {str(e)}")
+        logger.error(f"Error updating test suite {suite_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to update test suite: {str(e)}")
 
 
-async def _run_web_test_async(
-    test_service: WebScaledTestingService,
-    test_id: str,
-    request: WebScaledTestRequest,
+@router.delete("/{suite_id}")
+async def delete_test_suite(
+    suite_id: UUID,
+    service: TestSuiteService = Depends(get_test_suite_service),
 ):
-    """Run the web test asynchronously and store results."""
+    """Delete a test suite."""
+    # Check if suite exists
+    existing_suite = await service.get_test_suite(suite_id)
+    if not existing_suite:
+        raise HTTPException(status_code=404, detail=f"Test suite '{suite_id}' not found")
+
     try:
-        result = await test_service.run_concurrent_test(
-            concurrent_requests=request.concurrent_requests,
-            timeout=request.timeout,
-            test_id=test_id,
-        )
-        logger.info(f"Web test {test_id} completed: {result}")
+        success = await service.delete_test_suite(suite_id)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to delete test suite")
+
+        return {"success": True, "message": f"Test suite '{suite_id}' deleted successfully"}
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error running web test {test_id}: {e}")
-    finally:
-        # Remove from active tests after completion
-        if test_id in active_web_tests:
-            del active_web_tests[test_id]
+        logger.error(f"Error deleting test suite {suite_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete test suite: {str(e)}")

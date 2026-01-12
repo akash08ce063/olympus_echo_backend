@@ -3,12 +3,14 @@ import logging
 import os
 import sys
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
 try:
     from rich.console import Console
     from rich.logging import RichHandler
+    from rich.text import Text
     RICH_AVAILABLE = True
 except ImportError:
     RICH_AVAILABLE = False
@@ -86,6 +88,17 @@ class RichLogger:
 
                 # Create rich text with colors and formatting
                 timestamp = datetime.fromtimestamp(record.created).strftime("%H:%M:%S.%f")[:-3]
+
+                # Color mapping for levels
+                level_colors = {
+                    "DEBUG": "cyan",
+                    "INFO": "green",
+                    "WARNING": "yellow",
+                    "ERROR": "red",
+                    "CRITICAL": "red bold",
+                }
+
+                level_color = level_colors.get(record.levelname, "white")
 
                 # Build the formatted message
                 parts = [
