@@ -96,12 +96,20 @@ async def run_test_suite(
                 detail="No active test cases found in this test suite"
             )
 
-        # Get the request ID from header
-        request_id = request_obj.headers.get("x-pranthora-callid")
-        if not request_id:
+        # Get the request IDs from header (comma-separated for concurrent calls)
+        request_ids_header = request_obj.headers.get("x-pranthora-callid")
+        if not request_ids_header:
             raise HTTPException(
                 status_code=400,
                 detail="x-pranthora-callid header is required"
+            )
+        
+        # Parse comma-separated request IDs
+        request_ids = [rid.strip() for rid in request_ids_header.split(",") if rid.strip()]
+        if not request_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="x-pranthora-callid header must contain at least one request ID"
             )
 
         # Start the test execution
@@ -116,7 +124,7 @@ async def run_test_suite(
             test_suite_id=suite_id,
             user_id=user_id,
             concurrent_calls=request.concurrent_calls,
-            request_id=request_id,
+            request_ids=request_ids,
             execution_mode=execution_mode
         )
 
@@ -198,12 +206,20 @@ async def run_test_case(
         finally:
             await test_case_service.close()
 
-        # Get the request ID from header
-        request_id = request_obj.headers.get("x-pranthora-callid")
-        if not request_id:
+        # Get the request IDs from header (comma-separated for concurrent calls)
+        request_ids_header = request_obj.headers.get("x-pranthora-callid")
+        if not request_ids_header:
             raise HTTPException(
                 status_code=400,
                 detail="x-pranthora-callid header is required"
+            )
+        
+        # Parse comma-separated request IDs
+        request_ids = [rid.strip() for rid in request_ids_header.split(",") if rid.strip()]
+        if not request_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="x-pranthora-callid header must contain at least one request ID"
             )
 
         # Start the test execution
@@ -211,7 +227,7 @@ async def run_test_case(
             test_case_id=case_id,
             user_id=user_id,
             concurrent_calls=request.concurrent_calls,
-            request_id=request_id
+            request_ids=request_ids
         )
 
         return TestExecutionResponse(

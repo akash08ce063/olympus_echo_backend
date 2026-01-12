@@ -6,6 +6,7 @@ Separated from test_execution_routes.py for modular code organization.
 """
 
 import asyncio
+from collections import defaultdict
 from typing import Optional
 from uuid import UUID
 
@@ -93,44 +94,66 @@ async def list_test_runs(
             run_id = str(run.id)
             results = test_case_results_map.get(run_id, [])
             
-            test_case_results = []
-            
+            # Group results by test_case_id to handle multiple entries per test case (concurrent calls)
+            results_by_test_case = defaultdict(list)
             for r in results:
                 test_case_id = r['test_case_id']
-                # Extract wav_file_ids from conversation_logs metadata
-                conversation_logs = r.get('conversation_logs', []) or []
+                results_by_test_case[test_case_id].append(r)
+            
+            test_case_results = []
+            
+            for test_case_id, test_case_result_entries in results_by_test_case.items():
+                # Use the first entry for metadata (they should all have the same test_case_id, concurrent_calls, etc.)
+                first_entry = test_case_result_entries[0]
+                concurrent_calls = first_entry.get('concurrent_calls', len(test_case_result_entries)) or len(test_case_result_entries)
+                
+                # Extract wav_file_ids from conversation_logs metadata (from first entry)
+                conversation_logs = first_entry.get('conversation_logs', []) or []
                 wav_file_ids = []
                 if isinstance(conversation_logs, list):
                     for log_entry in conversation_logs:
                         if isinstance(log_entry, dict) and log_entry.get('type') == 'recording_metadata' and 'wav_file_ids' in log_entry:
                             wav_file_ids = log_entry.get('wav_file_ids', [])
                             break
-                concurrent_calls = r.get('concurrent_calls', 1) or 1
                 
                 # Build call_recordings array for all concurrent calls
                 call_recordings = []
                 call_transcripts = []
                 
-                # Fetch transcript using test_case_result.id (primary key, which is the request_id)
-                result_id = r['id']
-                logger.info(f"\n\n\nFetching transcript using test_case_result.id: {result_id}\n\n\n")
-                try:
-                    async with PranthoraApiClient() as pranthora_client:
-                        call_logs = await pranthora_client.get_call_logs(result_id)
-                        if call_logs and call_logs.get('call_transcript'):
-                            logger.info(f"✅ Successfully fetched transcript for test_case_result {result_id}: {len(call_logs.get('call_transcript', []))} messages")
-                            call_transcripts.append({
-                                "request_id": call_logs.get('request_id'),
-                                "id": call_logs.get('id'),
-                                "call_transcript": call_logs.get('call_transcript', []),
-                                "duration_seconds": call_logs.get('call_duration'),
-                                "created_at": call_logs.get('created_at')
-                            })
-                        else:
-                            logger.warning(f"No transcript found for test_case_result {result_id}")
-                except Exception as e:
-                    logger.error(f"❌ Failed to fetch transcript for test_case_result {result_id}: {e}")
+                # Fetch transcripts for ALL test_case_result entries (one per concurrent call)
+                async def fetch_transcript_for_result(result_entry):
+                    """Fetch transcript for a single test_case_result entry."""
+                    result_id = result_entry['id']
+                    logger.info(f"Fetching transcript using test_case_result.id: {result_id}")
+                    try:
+                        async with PranthoraApiClient() as pranthora_client:
+                            call_logs = await pranthora_client.get_call_logs(result_id)
+                            if call_logs and call_logs.get('call_transcript'):
+                                logger.info(f"✅ Successfully fetched transcript for test_case_result {result_id}: {len(call_logs.get('call_transcript', []))} messages")
+                                return {
+                                    "request_id": call_logs.get('request_id'),
+                                    "id": call_logs.get('id'),
+                                    "call_transcript": call_logs.get('call_transcript', []),
+                                    "duration_seconds": call_logs.get('call_duration'),
+                                    "created_at": call_logs.get('created_at')
+                                }
+                            else:
+                                logger.warning(f"No transcript found for test_case_result {result_id}")
+                                return None
+                    except Exception as e:
+                        logger.error(f"❌ Failed to fetch transcript for test_case_result {result_id}: {e}")
+                        return None
                 
+                # Fetch all transcripts in parallel
+                transcript_tasks = [fetch_transcript_for_result(entry) for entry in test_case_result_entries]
+                transcript_results = await asyncio.gather(*transcript_tasks)
+                
+                # Add successful transcript fetches
+                for transcript in transcript_results:
+                    if transcript:
+                        call_transcripts.append(transcript)
+                
+                # Build call_recordings from wav_file_ids or individual recording_file_urls
                 if wav_file_ids and len(wav_file_ids) > 0:
                     # Generate all signed URLs in parallel
                     url_tasks = []
@@ -146,24 +169,30 @@ async def list_test_runs(
                     for idx, signed_url_result in enumerate(signed_url_results):
                         if signed_url_result:
                             call_recordings.append(signed_url_result)
-                elif r.get('recording_file_url'):
-                    call_recordings.append({
-                        "call_number": 1,
-                        "recording_url": r['recording_file_url']
-                    })
+                else:
+                    # Fallback: use recording_file_url from each entry
+                    for idx, entry in enumerate(test_case_result_entries):
+                        if entry.get('recording_file_url'):
+                            call_recordings.append({
+                                "call_number": idx + 1,
+                                "recording_url": entry['recording_file_url']
+                            })
+                
+                # Use first entry's result_id for backward compatibility
+                primary_result_id = first_entry['id']
                 
                 test_case_results.append({
-                    "result_id": r['id'],
+                    "result_id": primary_result_id,
                     "test_case_id": test_case_id,
                     "concurrent_calls": concurrent_calls,
                     "call_recordings": call_recordings,
-                    "call_transcripts": call_transcripts,
+                    "call_transcripts": call_transcripts,  # Now contains transcripts for ALL concurrent calls
                     "recording_url": call_recordings[0]["recording_url"] if call_recordings else None,
-                    "status": r['status'],
-                    "error_message": r.get('error_message'),
-                    "evaluation_result": r.get('evaluation_result'),
-                    "started_at": r.get('started_at'),
-                    "completed_at": r.get('completed_at')
+                    "status": first_entry['status'],
+                    "error_message": first_entry.get('error_message'),
+                    "evaluation_result": first_entry.get('evaluation_result'),
+                    "started_at": first_entry.get('started_at'),
+                    "completed_at": first_entry.get('completed_at')
                 })
             
             grouped_runs.append({
