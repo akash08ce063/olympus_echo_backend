@@ -80,7 +80,7 @@ class StaticMemoryCache:
     @classmethod
     def get_audio_chunk_duration_ms(cls) -> float:
         """Get audio chunk duration in milliseconds from config."""
-        return float(cls.get_config("audio", "chunk_duration_ms", 20.0))
+        return float(cls.get_config("audio", "chunk_duration_ms"))
 
     @classmethod
     def is_initialized(cls) -> bool:

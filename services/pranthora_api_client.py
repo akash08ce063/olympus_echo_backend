@@ -16,6 +16,7 @@ from telemetrics.logger import logger
 
 class AgentCreateRequest(BaseModel):
     """Agent creation request schema matching Pranthora API."""
+
     name: str = Field(..., description="Agent name")
     description: Optional[str] = Field(None, description="Agent description")
     is_active: bool = Field(True, description="Whether agent is active")
@@ -27,6 +28,7 @@ class AgentCreateRequest(BaseModel):
 
 class ModelConfigRequest(BaseModel):
     """Model configuration request schema."""
+
     model_provider_id: str = Field(..., description="Model provider ID")
     api_key_reference: Optional[str] = Field(None, description="API key reference")
     temperature: Optional[float] = Field(None, ge=0.0, le=2.0, description="Temperature")
@@ -38,6 +40,7 @@ class ModelConfigRequest(BaseModel):
 
 class CompleteAgentRequest(BaseModel):
     """Complete agent creation request matching Pranthora API."""
+
     agent: AgentCreateRequest
     agent_model_config: Optional[ModelConfigRequest] = None
 
@@ -49,11 +52,7 @@ class PranthoraApiClient:
         self.api_key = StaticMemoryCache.get_pranthora_api_key()
         self.base_url = StaticMemoryCache.get_pranthora_base_url()
         self.client = httpx.AsyncClient(
-            headers={
-                "x-api-key": self.api_key,
-                "Content-Type": "application/json"
-            },
-            timeout=30.0
+            headers={"x-api-key": self.api_key, "Content-Type": "application/json"}, timeout=30.0
         )
 
     async def __aenter__(self):
@@ -62,7 +61,9 @@ class PranthoraApiClient:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.client.aclose()
 
-    async def create_agent(self, agent_data: Dict[str, Any], request_id: Optional[str] = None) -> Dict[str, Any]:
+    async def create_agent(
+        self, agent_data: Dict[str, Any], request_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         Create a new agent in Pranthora backend.
 
@@ -78,7 +79,7 @@ class PranthoraApiClient:
             request_data = {
                 "name": agent_data.get("name", ""),
                 "system_prompt": agent_data.get("system_prompt"),
-                "temperature": agent_data.get("temperature", 0.7)
+                "temperature": agent_data.get("temperature", 0.7),
             }
 
             url = f"{self.base_url}/api/v1/agents/simple"
@@ -89,19 +90,19 @@ class PranthoraApiClient:
             if request_id:
                 headers["x-pranthora-callid"] = request_id
 
-            response = await self.client.post(
-                url,
-                json=request_data,
-                headers=headers
-            )
+            response = await self.client.post(url, json=request_data, headers=headers)
 
             if response.status_code == 201:
                 result = response.json()
-                logger.info(f"Successfully created agent in Pranthora: {result.get('agent', {}).get('id')}")
+                logger.info(
+                    f"Successfully created agent in Pranthora: {result.get('agent', {}).get('id')}"
+                )
                 return result
             else:
                 error_detail = response.text
-                logger.error(f"Failed to create agent in Pranthora: {response.status_code} - {error_detail}")
+                logger.error(
+                    f"Failed to create agent in Pranthora: {response.status_code} - {error_detail}"
+                )
                 raise Exception(f"Pranthora API error: {response.status_code} - {error_detail}")
 
         except Exception as e:
@@ -124,7 +125,9 @@ class PranthoraApiClient:
             update_data = {}
 
             # Agent fields
-            if any(key in agent_data for key in ["name", "description", "is_active", "system_prompt"]):
+            if any(
+                key in agent_data for key in ["name", "description", "is_active", "system_prompt"]
+            ):
                 update_data["agent"] = {}
                 for field in ["name", "description", "is_active"]:
                     if field in agent_data:
@@ -136,7 +139,7 @@ class PranthoraApiClient:
                     "model_provider_id": "openai",
                     "system_prompt": agent_data.get("system_prompt", ""),
                     "temperature": agent_data.get("temperature", 0.7),
-                    "max_tokens": 4000  # Keep default max tokens
+                    "max_tokens": 4000,  # Keep default max tokens
                 }
 
             if not update_data:
@@ -147,7 +150,8 @@ class PranthoraApiClient:
 
             response = await self.client.put(
                 url,
-                json=update_data
+                params={"force_update": True},
+                json=update_data,
             )
 
             if response.status_code == 200:
@@ -156,7 +160,9 @@ class PranthoraApiClient:
                 return result
             else:
                 error_detail = response.text
-                logger.error(f"Failed to update agent in Pranthora: {response.status_code} - {error_detail}")
+                logger.error(
+                    f"Failed to update agent in Pranthora: {response.status_code} - {error_detail}"
+                )
                 raise Exception(f"Pranthora API error: {response.status_code} - {error_detail}")
 
         except Exception as e:
@@ -186,7 +192,9 @@ class PranthoraApiClient:
                 raise Exception(f"Agent not found: {agent_id}")
             else:
                 error_detail = response.text
-                logger.error(f"Failed to get agent from Pranthora: {response.status_code} - {error_detail}")
+                logger.error(
+                    f"Failed to get agent from Pranthora: {response.status_code} - {error_detail}"
+                )
                 raise Exception(f"Pranthora API error: {response.status_code} - {error_detail}")
 
         except Exception as e:
@@ -213,7 +221,9 @@ class PranthoraApiClient:
                 return True
             else:
                 error_detail = response.text
-                logger.error(f"Failed to delete agent from Pranthora: {response.status_code} - {error_detail}")
+                logger.error(
+                    f"Failed to delete agent from Pranthora: {response.status_code} - {error_detail}"
+                )
                 raise Exception(f"Pranthora API error: {response.status_code} - {error_detail}")
 
         except Exception as e:
@@ -223,7 +233,7 @@ class PranthoraApiClient:
     async def get_call_logs(self, request_id: str) -> Optional[Dict[str, Any]]:
         """
         Get call logs/session transcripts from Pranthora backend by request ID.
-        
+
         The request_id is the same as the x-pranthora-callid header value
         used when starting the test case execution.
 
@@ -248,7 +258,9 @@ class PranthoraApiClient:
                 return None
             else:
                 error_detail = response.text
-                logger.error(f"Failed to get call logs from Pranthora: {response.status_code} - {error_detail}")
+                logger.error(
+                    f"Failed to get call logs from Pranthora: {response.status_code} - {error_detail}"
+                )
                 raise Exception(f"Pranthora API error: {response.status_code} - {error_detail}")
 
         except Exception as e:

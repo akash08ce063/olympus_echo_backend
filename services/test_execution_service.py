@@ -814,11 +814,30 @@ class TestExecutionService:
             def record_audio_bridge(audio_bytes: bytes, source: str):
                 """Record audio from bridge for this isolated conversation."""
                 try:
+                    start_time = time.perf_counter()
+
                     combined_audio_data.extend(audio_bytes)
 
                     # Convert μ-law to PCM for this call's isolated WAV recording
                     pcm = audioop.ulaw2lin(audio_bytes, 2)  # 16-bit PCM
                     isolated_pcm_frames.extend(pcm)
+
+                    # Check if this is silence
+                    is_silence = audio_bytes == (b"\xff" * len(audio_bytes))
+
+                    # Measure recording performance
+                    duration_ms = (time.perf_counter() - start_time) * 1000
+
+                    # Log slow recording or silence being recorded
+                    if duration_ms > 1.0:
+                        logger.warning(
+                            f"[Call {call_number}] [RECORD-SLOW] {source}: {duration_ms:.2f}ms"
+                        )
+
+                    if is_silence:
+                        logger.debug(
+                            f"[Call {call_number}] [RECORD-SILENCE] {source}: {len(audio_bytes)} bytes of silence"
+                        )
 
                     conversation_logs.append(
                         {
@@ -1032,6 +1051,13 @@ class TestExecutionService:
                                 # Send to user agent
                                 await outgoing_queue.put(audio_bytes)
 
+                                # Debug: Log queue depth after putting audio
+                                queue_depth = outgoing_queue.qsize()
+                                if queue_depth > 10:
+                                    logger.warning(
+                                        f"[Target-READ] Queue backing up: {queue_depth} items"
+                                    )
+
                             elif event_type == "mark":
                                 logger.info(f"[Target] Mark: {data.get('mark', {}).get('name')}")
                             elif event_type == "clear":
@@ -1068,20 +1094,33 @@ class TestExecutionService:
                     stream_sid = f"stream_{call_sid}"
                     next_tick = time.time()
 
+                    # Debug counters
+                    audio_chunks_sent = 0
+                    silence_chunks_sent = 0
+
                     try:
                         while not stop_event.is_set():
+                            cycle_start = time.time()
+
                             # Maintain configurable cadence
                             next_tick += self.chunk_duration_seconds
                             sleep_time = next_tick - time.time()
                             if sleep_time > 0:
                                 await asyncio.sleep(sleep_time)
 
+                            # Check cadence drift
+                            actual_time = time.time()
+                            drift_ms = (actual_time - next_tick) * 1000
+                            if abs(drift_ms) > 3:
+                                logger.warning(f"[Target-WRITE] Cadence drift: {drift_ms:.2f}ms")
+
                             payload_to_send = None
+                            queue_depth_before = incoming_queue.qsize()
 
                             # Try to get audio from user agent with small timeout to avoid race condition
                             try:
                                 audio_data = await asyncio.wait_for(
-                                    incoming_queue.get(), timeout=0.001
+                                    incoming_queue.get(), timeout=self.chunk_duration_seconds + 0.01
                                 )
 
                                 # Record what we send to target agent (user's audio)
@@ -1089,6 +1128,7 @@ class TestExecutionService:
                                     record_sent_callback(audio_data)
 
                                 payload_to_send = base64.b64encode(audio_data).decode("utf-8")
+                                audio_chunks_sent += 1
 
                                 current_time = time.time()
 
@@ -1104,6 +1144,10 @@ class TestExecutionService:
 
                             except asyncio.TimeoutError:
                                 # No chunk arrived within timeout, will send silence
+                                logger.warning(
+                                    f"[Target-WRITE] ⚠️ TIMEOUT! Queue had {queue_depth_before} items. "
+                                    f"Sending SILENCE (break #{silence_chunks_sent + 1})"
+                                )
                                 pass
                             except Exception as queue_error:
                                 logger.warning(
@@ -1115,12 +1159,20 @@ class TestExecutionService:
                             if not payload_to_send:
                                 chunk_size = int(8000 * self.chunk_duration_seconds)  # 8kHz
                                 silence = b"\xff" * chunk_size  # μ-law silence
+                                silence_chunks_sent += 1
 
                                 # Record silence we send to target agent
                                 if record_sent_callback:
                                     record_sent_callback(silence)
 
                                 payload_to_send = base64.b64encode(silence).decode("utf-8")
+
+                                # Log if we're sending too much silence
+                                if silence_chunks_sent % 10 == 0:
+                                    logger.warning(
+                                        f"[Target-WRITE] Sent {silence_chunks_sent} silence chunks vs "
+                                        f"{audio_chunks_sent} audio chunks"
+                                    )
 
                             # Send media event with error handling
                             try:
@@ -1255,6 +1307,13 @@ class TestExecutionService:
                                 # Send to target agent
                                 await outgoing_queue.put(audio_bytes)
 
+                                # Debug: Log queue depth after putting audio
+                                queue_depth = outgoing_queue.qsize()
+                                if queue_depth > 10:
+                                    logger.warning(
+                                        f"[User-READ] Queue backing up: {queue_depth} items"
+                                    )
+
                             elif event_type == "mark":
                                 logger.info(f"[User] Mark: {data.get('mark', {}).get('name')}")
                             elif event_type == "clear":
@@ -1291,20 +1350,33 @@ class TestExecutionService:
                     stream_sid = f"stream_{call_sid}"
                     next_tick = time.time()
 
+                    # Debug counters
+                    audio_chunks_sent = 0
+                    silence_chunks_sent = 0
+
                     try:
                         while not stop_event.is_set():
+                            cycle_start = time.time()
+
                             # Maintain configurable cadence
                             next_tick += self.chunk_duration_seconds
                             sleep_time = next_tick - time.time()
                             if sleep_time > 0:
                                 await asyncio.sleep(sleep_time)
 
+                            # Check cadence drift
+                            actual_time = time.time()
+                            drift_ms = (actual_time - next_tick) * 1000
+                            if abs(drift_ms) > 3:
+                                logger.warning(f"[User-WRITE] Cadence drift: {drift_ms:.2f}ms")
+
                             payload_to_send = None
+                            queue_depth_before = incoming_queue.qsize()
 
                             # Try to get audio from target agent with small timeout to avoid race condition
                             try:
                                 audio_data = await asyncio.wait_for(
-                                    incoming_queue.get(), timeout=0.001
+                                    incoming_queue.get(), timeout=self.chunk_duration_seconds + 0.01
                                 )
 
                                 # Record what we send to user agent (target's audio)
@@ -1312,6 +1384,7 @@ class TestExecutionService:
                                     record_sent_callback(audio_data)
 
                                 payload_to_send = base64.b64encode(audio_data).decode("utf-8")
+                                audio_chunks_sent += 1
 
                                 current_time = time.time()
 
@@ -1327,6 +1400,10 @@ class TestExecutionService:
 
                             except asyncio.TimeoutError:
                                 # No chunk arrived within timeout, will send silence
+                                logger.warning(
+                                    f"[User-WRITE] ⚠️ TIMEOUT! Queue had {queue_depth_before} items. "
+                                    f"Sending SILENCE (break #{silence_chunks_sent + 1})"
+                                )
                                 pass
                             except Exception as queue_error:
                                 logger.warning(
@@ -1338,12 +1415,20 @@ class TestExecutionService:
                             if not payload_to_send:
                                 chunk_size = int(8000 * self.chunk_duration_seconds)  # 8kHz
                                 silence = b"\xff" * chunk_size  # μ-law silence
+                                silence_chunks_sent += 1
 
                                 # Record silence we send to user agent
                                 if record_sent_callback:
                                     record_sent_callback(silence)
 
                                 payload_to_send = base64.b64encode(silence).decode("utf-8")
+
+                                # Log if we're sending too much silence
+                                if silence_chunks_sent % 10 == 0:
+                                    logger.warning(
+                                        f"[User-WRITE] Sent {silence_chunks_sent} silence chunks vs "
+                                        f"{audio_chunks_sent} audio chunks"
+                                    )
 
                             # Send media event with error handling
                             try:
