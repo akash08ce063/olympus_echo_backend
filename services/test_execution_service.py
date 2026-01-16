@@ -83,7 +83,7 @@ class TestExecutionService:
         user_id: UUID,
         concurrent_calls: Optional[int] = None,
         request_ids: Optional[List[str]] = None,
-        execution_mode: str = "sequential"
+        execution_mode: str = "sequential",
     ) -> UUID:
         """
         Run all active test cases in a test suite.
@@ -119,11 +119,15 @@ class TestExecutionService:
             # Use first request_id for test run creation (backward compatibility)
             primary_request_id = request_ids[0] if request_ids and len(request_ids) > 0 else None
             # Create test run record
-            test_run_id = await self._create_test_run(test_suite_id, user_id, len(test_cases), primary_request_id)
+            test_run_id = await self._create_test_run(
+                test_suite_id, user_id, len(test_cases), primary_request_id
+            )
 
             # Execute test cases asynchronously
             asyncio.create_task(
-                self._execute_test_cases_async(test_run_id, test_cases, concurrent_calls, execution_mode, request_ids)
+                self._execute_test_cases_async(
+                    test_run_id, test_cases, concurrent_calls, execution_mode, request_ids
+                )
             )
 
             logger.info(
@@ -140,7 +144,7 @@ class TestExecutionService:
         test_case_id: UUID,
         user_id: UUID,
         concurrent_calls: Optional[int] = None,
-        request_ids: Optional[List[str]] = None
+        request_ids: Optional[List[str]] = None,
     ) -> UUID:
         """
         Run a single test case.
@@ -168,11 +172,15 @@ class TestExecutionService:
             # Use first request_id for test run creation (backward compatibility)
             primary_request_id = request_ids[0] if request_ids and len(request_ids) > 0 else None
             # Create test run record
-            test_run_id = await self._create_test_run(test_case.test_suite_id, user_id, 1, primary_request_id)
+            test_run_id = await self._create_test_run(
+                test_case.test_suite_id, user_id, 1, primary_request_id
+            )
 
             # Execute single test case asynchronously
             asyncio.create_task(
-                self._execute_single_test_case_async(test_run_id, test_case, concurrent_calls, request_ids)
+                self._execute_single_test_case_async(
+                    test_run_id, test_case, concurrent_calls, request_ids
+                )
             )
 
             logger.info(f"Started single test case execution: {test_run_id}")
@@ -220,7 +228,7 @@ class TestExecutionService:
         test_cases: List[TestCase],
         concurrent_calls: Optional[int] = None,
         execution_mode: str = "sequential",
-        request_ids: Optional[List[str]] = None
+        request_ids: Optional[List[str]] = None,
     ):
         """Execute multiple test cases asynchronously."""
         try:
@@ -237,12 +245,23 @@ class TestExecutionService:
                 tasks = []
                 for test_case in test_cases:
                     # Determine concurrent calls for this specific test case
-                    test_case_concurrent_calls = test_case.default_concurrent_calls if test_case.default_concurrent_calls and test_case.default_concurrent_calls > 0 else (concurrent_calls if concurrent_calls and concurrent_calls > 0 else 1)
+                    test_case_concurrent_calls = (
+                        test_case.default_concurrent_calls
+                        if test_case.default_concurrent_calls
+                        and test_case.default_concurrent_calls > 0
+                        else (concurrent_calls if concurrent_calls and concurrent_calls > 0 else 1)
+                    )
                     # Generate unique request_ids for this test case (don't use suite-level request_ids to avoid conflicts)
-                    test_case_request_ids = [str(uuid4()) for _ in range(test_case_concurrent_calls)]
-                    logger.info(f"Generated {len(test_case_request_ids)} unique request_ids for test case {test_case.id} (concurrent_calls={test_case_concurrent_calls})")
+                    test_case_request_ids = [
+                        str(uuid4()) for _ in range(test_case_concurrent_calls)
+                    ]
+                    logger.info(
+                        f"Generated {len(test_case_request_ids)} unique request_ids for test case {test_case.id} (concurrent_calls={test_case_concurrent_calls})"
+                    )
                     tasks.append(
-                        self._execute_test_case(test_case, test_run_id, concurrent_calls, test_case_request_ids)
+                        self._execute_test_case(
+                            test_case, test_run_id, concurrent_calls, test_case_request_ids
+                        )
                     )
                 results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -264,11 +283,24 @@ class TestExecutionService:
                     try:
                         # For sequential execution, generate unique request_ids per test case
                         # Determine concurrent calls for this specific test case
-                        test_case_concurrent_calls = test_case.default_concurrent_calls if test_case.default_concurrent_calls and test_case.default_concurrent_calls > 0 else (concurrent_calls if concurrent_calls and concurrent_calls > 0 else 1)
+                        test_case_concurrent_calls = (
+                            test_case.default_concurrent_calls
+                            if test_case.default_concurrent_calls
+                            and test_case.default_concurrent_calls > 0
+                            else (
+                                concurrent_calls if concurrent_calls and concurrent_calls > 0 else 1
+                            )
+                        )
                         # Generate unique request_ids for this test case (don't reuse suite-level request_ids)
-                        test_case_request_ids = [str(uuid4()) for _ in range(test_case_concurrent_calls)]
-                        logger.info(f"Generated {len(test_case_request_ids)} unique request_ids for test case {test_case.id} (concurrent_calls={test_case_concurrent_calls})")
-                        result = await self._execute_test_case(test_case, test_run_id, concurrent_calls, test_case_request_ids)
+                        test_case_request_ids = [
+                            str(uuid4()) for _ in range(test_case_concurrent_calls)
+                        ]
+                        logger.info(
+                            f"Generated {len(test_case_request_ids)} unique request_ids for test case {test_case.id} (concurrent_calls={test_case_concurrent_calls})"
+                        )
+                        result = await self._execute_test_case(
+                            test_case, test_run_id, concurrent_calls, test_case_request_ids
+                        )
                         results.append(result)
 
                         # Status values: completed, failed
@@ -301,11 +333,13 @@ class TestExecutionService:
         test_run_id: UUID,
         test_case: TestCase,
         concurrent_calls: Optional[int] = None,
-        request_ids: Optional[List[str]] = None
+        request_ids: Optional[List[str]] = None,
     ):
         """Execute a single test case asynchronously."""
         try:
-            result = await self._execute_test_case(test_case, test_run_id, concurrent_calls, request_ids)
+            result = await self._execute_test_case(
+                test_case, test_run_id, concurrent_calls, request_ids
+            )
 
             # Status values: completed, failed
             passed_count = 1 if result["status"] == "completed" else 0
@@ -331,7 +365,7 @@ class TestExecutionService:
         test_case: TestCase,
         test_run_id: UUID,
         concurrent_calls: Optional[int] = None,
-        request_ids: Optional[List[str]] = None
+        request_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Execute a single test case."""
         try:
@@ -376,25 +410,31 @@ class TestExecutionService:
                 calls_to_use = test_case.default_concurrent_calls
             else:
                 calls_to_use = concurrent_calls if concurrent_calls and concurrent_calls > 0 else 1
-            
+
             # Prepare request_ids: use provided ones or generate if not enough provided
             if request_ids and len(request_ids) >= calls_to_use:
                 # Use provided request_ids (frontend sent the correct number)
                 call_request_ids = request_ids[:calls_to_use]
-                logger.info(f"Using {len(call_request_ids)} request_ids from frontend: {call_request_ids}")
+                logger.info(
+                    f"Using {len(call_request_ids)} request_ids from frontend: {call_request_ids}"
+                )
             else:
                 # Not enough request_ids provided - generate missing ones
                 if request_ids:
-                    logger.warning(f"Only {len(request_ids)} request_ids provided but {calls_to_use} concurrent calls needed. Generating missing ones.")
+                    logger.warning(
+                        f"Only {len(request_ids)} request_ids provided but {calls_to_use} concurrent calls needed. Generating missing ones."
+                    )
                     call_request_ids = request_ids[:]
                     # Generate remaining request_ids
                     for i in range(len(request_ids), calls_to_use):
                         call_request_ids.append(str(uuid4()))
                 else:
                     # No request_ids provided - generate all
-                    logger.warning(f"No request_ids provided. Generating {calls_to_use} request_ids.")
+                    logger.warning(
+                        f"No request_ids provided. Generating {calls_to_use} request_ids."
+                    )
                     call_request_ids = [str(uuid4()) for _ in range(calls_to_use)]
-            
+
             # Create separate test_case_result entries for each concurrent call
             created_result_ids = []
             for call_num, call_request_id in enumerate(call_request_ids, start=1):
@@ -407,16 +447,18 @@ class TestExecutionService:
                     "conversation_logs": [],
                     "evaluation_result": None,
                     "error_message": None,
-                    "concurrent_calls": calls_to_use
+                    "concurrent_calls": calls_to_use,
                 }
                 try:
                     result_id = await self.test_result_service.create_with_id(initial_result_data)
                     created_result_ids.append(result_id)
-                    logger.info(f"Created test case result {result_id} (call {call_num}/{calls_to_use}) with request_id {call_request_id} for test case {test_case.id}")
+                    logger.info(
+                        f"Created test case result {result_id} (call {call_num}/{calls_to_use}) with request_id {call_request_id} for test case {test_case.id}"
+                    )
                 except Exception as e:
                     logger.error(f"Failed to create test case result for call {call_num}: {e}")
                     # Continue with other calls even if one fails
-            
+
             if not created_result_ids:
                 raise ValueError("Failed to create any test case result entries")
 
@@ -425,7 +467,12 @@ class TestExecutionService:
 
             # Simulate conversation using goals/prompts, passing all request_ids
             conversation_result = await self._simulate_conversation(
-                test_case, target_agent, user_agent, calls_to_use, primary_request_id, call_request_ids
+                test_case,
+                target_agent,
+                user_agent,
+                calls_to_use,
+                primary_request_id,
+                call_request_ids,
             )
 
             # Determine status based on conversation result
@@ -452,7 +499,6 @@ class TestExecutionService:
             # Get wav_file_ids and request_ids from conversation result
             wav_file_ids = conversation_result.get("wav_file_ids", [])
             concurrent_calls_count = conversation_result.get("concurrent_calls", 1)
-            result_request_ids = conversation_result.get("request_ids", call_request_ids)
 
             # Update all test_case_result entries we created (one per concurrent call)
             # Match each result entry with its corresponding call data
@@ -460,19 +506,22 @@ class TestExecutionService:
             for idx, result_id in enumerate(created_result_ids):
                 call_num = idx + 1
                 call_request_id = call_request_ids[idx] if idx < len(call_request_ids) else None
-                
+
                 # Get the corresponding wav_file_id and conversation logs for this call
                 call_wav_file_id = wav_file_ids[idx] if idx < len(wav_file_ids) else None
                 call_recording_url = None
-                
+
                 # Generate signed URL for this call's recording if available
                 if call_wav_file_id:
                     try:
                         from data_layer.supabase_client import get_supabase_client
+
                         supabase_client = await get_supabase_client()
                         file_name = f"test_case_{test_case.id}_call_{call_num}_recording.wav"
                         file_path = f"{call_wav_file_id}_{file_name}"
-                        call_recording_url = await supabase_client.create_signed_url("recording_files", file_path, 3600)
+                        call_recording_url = await supabase_client.create_signed_url(
+                            "recording_files", file_path, 3600
+                        )
                     except Exception as e:
                         logger.warning(f"Failed to generate signed URL for call {call_num}: {e}")
 
@@ -480,18 +529,20 @@ class TestExecutionService:
                 # Only store recording_metadata in conversation_logs, not verbose audio logs
                 conversation_logs = []
                 if wav_file_ids:
-                    conversation_logs.append({
-                        "type": "recording_metadata",
-                        "wav_file_ids": wav_file_ids,
-                        "concurrent_calls": concurrent_calls_count
-                    })
-                
+                    conversation_logs.append(
+                        {
+                            "type": "recording_metadata",
+                            "wav_file_ids": wav_file_ids,
+                            "concurrent_calls": concurrent_calls_count,
+                        }
+                    )
+
                 update_data = {
                     "status": status,
                     "conversation_logs": conversation_logs,  # Only metadata, no verbose logs
                     "evaluation_result": None,  # Will be updated by sequential evaluation
                     "error_message": conversation_result.get("error_message"),
-                    "concurrent_calls": concurrent_calls_count
+                    "concurrent_calls": concurrent_calls_count,
                 }
 
                 # Add recording URL for this call
@@ -505,44 +556,56 @@ class TestExecutionService:
                     success = await self.test_result_service.update(result_id, update_data)
                     if success:
                         updated_result_ids.append(result_id)
-                        logger.info(f"Updated test case result {result_id} (call {call_num}) to status {status}")
+                        logger.info(
+                            f"Updated test case result {result_id} (call {call_num}) to status {status}"
+                        )
                     else:
-                        logger.error(f"Failed to update test case result {result_id} (call {call_num})")
+                        logger.error(
+                            f"Failed to update test case result {result_id} (call {call_num})"
+                        )
                 except Exception as e:
-                    logger.error(f"Error updating test case result {result_id} (call {call_num}): {e}")
+                    logger.error(
+                        f"Error updating test case result {result_id} (call {call_num}): {e}"
+                    )
 
             # Use first result_id for backward compatibility
-            primary_result_id = updated_result_ids[0] if updated_result_ids else created_result_ids[0]
-            
+            primary_result_id = (
+                updated_result_ids[0] if updated_result_ids else created_result_ids[0]
+            )
+
             # Run evaluation sequentially with retries (transcripts need time to persist)
             # Evaluation runs on the first result, but we'll update all entries with the same result
             evaluation_result = await self._evaluate_test_results_sequential(
                 test_case, conversation_result, user_agent, test_run_id, primary_result_id
             )
             logger.info(f"Completed evaluation for test case {test_case.id}")
-            
+
             # Update ALL test_case_result entries with the same evaluation result and status
             # (The primary_result_id was already updated by _evaluate_test_results_sequential)
             if evaluation_result:
                 # Determine final status based on evaluation
                 final_status = self._determine_test_status(evaluation_result)
-                
+
                 # Update all entries (including primary, which is idempotent) with the same evaluation result and status
                 for result_id in updated_result_ids:
                     try:
-                        await self.test_result_service.update(result_id, {
-                            "status": final_status,
-                            "evaluation_result": evaluation_result
-                        })
-                        logger.info(f"Updated test case result {result_id} with evaluation result and status {final_status}")
+                        await self.test_result_service.update(
+                            result_id,
+                            {"status": final_status, "evaluation_result": evaluation_result},
+                        )
+                        logger.info(
+                            f"Updated test case result {result_id} with evaluation result and status {final_status}"
+                        )
                     except Exception as e:
-                        logger.error(f"Error updating test case result {result_id} with evaluation: {e}")
+                        logger.error(
+                            f"Error updating test case result {result_id} with evaluation: {e}"
+                        )
 
             return {
                 "result_id": primary_result_id,
                 "status": status,
                 "conversation_result": conversation_result,
-                "all_result_ids": updated_result_ids
+                "all_result_ids": updated_result_ids,
             }
 
         except Exception as e:
@@ -583,14 +646,14 @@ class TestExecutionService:
         user_agent,
         concurrent_calls: int,
         primary_request_id: Optional[str] = None,
-        request_ids: Optional[List[str]] = None
+        request_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         Simulate conversations by connecting to user agent and target agent websockets,
         bridging audio between them, and recording the conversation(s).
 
         Supports concurrent calls - creates multiple simultaneous conversations when concurrent_calls > 1.
-        
+
         Args:
             test_case: Test case to execute
             target_agent: Target agent configuration
@@ -622,7 +685,9 @@ class TestExecutionService:
             # Prepare request_ids: use provided list or fallback to generating
             if request_ids and len(request_ids) >= concurrent_calls:
                 call_request_ids = request_ids[:concurrent_calls]
-                logger.info(f"Using {len(call_request_ids)} provided request_ids for concurrent calls")
+                logger.info(
+                    f"Using {len(call_request_ids)} provided request_ids for concurrent calls"
+                )
             else:
                 # Generate request_ids if not enough provided
                 if request_ids:
@@ -630,10 +695,14 @@ class TestExecutionService:
                     # Generate remaining
                     for i in range(len(request_ids), concurrent_calls):
                         call_request_ids.append(str(uuid4()))
-                    logger.warning(f"Only {len(request_ids)} request_ids provided, generated {concurrent_calls - len(request_ids)} more")
+                    logger.warning(
+                        f"Only {len(request_ids)} request_ids provided, generated {concurrent_calls - len(request_ids)} more"
+                    )
                 else:
                     # Use primary_request_id for first, generate rest
-                    call_request_ids = [primary_request_id] if primary_request_id else [str(uuid4())]
+                    call_request_ids = (
+                        [primary_request_id] if primary_request_id else [str(uuid4())]
+                    )
                     for i in range(1, concurrent_calls):
                         call_request_ids.append(str(uuid4()))
                     logger.info(f"Generated {concurrent_calls} request_ids for concurrent calls")
@@ -641,7 +710,9 @@ class TestExecutionService:
             # Create concurrent conversations using provided/generated request_ids
             conversation_tasks = []
             for call_num in range(concurrent_calls):
-                call_request_id = call_request_ids[call_num] if call_num < len(call_request_ids) else str(uuid4())
+                call_request_id = (
+                    call_request_ids[call_num] if call_num < len(call_request_ids) else str(uuid4())
+                )
                 task = asyncio.create_task(
                     self._simulate_single_conversation(
                         test_case, target_agent, user_agent, call_num + 1, call_request_id
@@ -663,7 +734,7 @@ class TestExecutionService:
 
             for i, result in enumerate(conversation_results):
                 if isinstance(result, Exception):
-                    logger.error(f"Conversation {i+1} failed: {result}")
+                    logger.error(f"Conversation {i + 1} failed: {result}")
                     failed_calls += 1
                     continue
 
@@ -673,14 +744,16 @@ class TestExecutionService:
                     all_conversation_logs.extend(result.get("conversation_logs", []))
                     all_audio_data.extend(result.get("audio_data", b""))
                     total_duration = max(total_duration, result.get("duration_seconds", 0))
-                    
+
                     # Collect request_id for fetching transcript from Pranthora (should match call_request_ids[i])
                     req_id = result.get("request_id")
                     if req_id and req_id not in request_ids:
                         request_ids.append(req_id)
                     elif req_id and i < len(call_request_ids) and req_id != call_request_ids[i]:
                         # Log if request_id doesn't match what we expected
-                        logger.warning(f"Call {call_number} request_id mismatch: expected {call_request_ids[i]}, got {req_id}")
+                        logger.warning(
+                            f"Call {call_number} request_id mismatch: expected {call_request_ids[i]}, got {req_id}"
+                        )
 
                     # Create individual WAV file for this call
                     pcm_frames = result.get("pcm_frames", b"")
@@ -723,7 +796,7 @@ class TestExecutionService:
                 else:
                     failed_calls += 1
                     logger.error(
-                        f"Conversation {i+1} failed: {result.get('error_message', 'Unknown error')}"
+                        f"Conversation {i + 1} failed: {result.get('error_message', 'Unknown error')}"
                     )
 
             duration_seconds = time.time() - start_time
@@ -855,48 +928,40 @@ class TestExecutionService:
             stop_event = asyncio.Event()
 
             # Isolated PCM recording buffer for this specific call
+            # Pre-allocate with estimated size (5 min call @ 8kHz = ~4.8MB PCM)
             isolated_pcm_frames = bytearray()
 
-            # Audio recording for this conversation only
+            # Async recording queue - decouples recording from audio streaming
+            # maxsize=1000 = ~20 sec buffer; if exceeded, something is catastrophically wrong
+            recording_queue = asyncio.Queue(maxsize=1000)
+            chunks_recorded = 0
+
             def record_audio_bridge(audio_bytes: bytes, source: str):
-                """Record audio from bridge for this isolated conversation."""
+                """Non-blocking: queue audio for background processing."""
                 try:
-                    start_time = time.perf_counter()
-
-                    combined_audio_data.extend(audio_bytes)
-
-                    # Convert μ-law to PCM for this call's isolated WAV recording
-                    pcm = audioop.ulaw2lin(audio_bytes, 2)  # 16-bit PCM
-                    isolated_pcm_frames.extend(pcm)
-
-                    # Check if this is silence
-                    is_silence = audio_bytes == (b"\xff" * len(audio_bytes))
-
-                    # Measure recording performance
-                    duration_ms = (time.perf_counter() - start_time) * 1000
-
-                    # Log slow recording or silence being recorded
-                    if duration_ms > 1.0:
-                        logger.warning(
-                            f"[Call {call_number}] [RECORD-SLOW] {source}: {duration_ms:.2f}ms"
-                        )
-
-                    if is_silence:
-                        logger.debug(
-                            f"[Call {call_number}] [RECORD-SILENCE] {source}: {len(audio_bytes)} bytes of silence"
-                        )
-
-                    conversation_logs.append(
-                        {
-                            "call_number": call_number,
-                            "turn": len(conversation_logs),
-                            "type": f"{source}_audio",
-                            "content": f"Audio received from {source} agent ({len(audio_bytes)} bytes)",
-                            "timestamp": datetime.utcnow().isoformat(),
-                        }
+                    recording_queue.put_nowait((audio_bytes, source))
+                except asyncio.QueueFull:
+                    logger.warning(
+                        f"[Call {call_number}] Recording queue full (1000 chunks), dropping chunk"
                     )
-                except Exception as e:
-                    logger.error(f"[Call {call_number}] Bridge recording error from {source}: {e}")
+
+            async def process_recording_queue():
+                """Background task: processes queued audio without blocking main loop."""
+                nonlocal chunks_recorded
+                while not stop_event.is_set() or not recording_queue.empty():
+                    try:
+                        audio_bytes, source = await asyncio.wait_for(
+                            recording_queue.get(), timeout=0.1
+                        )
+                        # Do the actual recording work here (off the critical audio path)
+                        combined_audio_data.extend(audio_bytes)
+                        pcm = audioop.ulaw2lin(audio_bytes, 2)  # 16-bit PCM
+                        isolated_pcm_frames.extend(pcm)
+                        chunks_recorded += 1
+                    except asyncio.TimeoutError:
+                        continue
+                    except Exception as e:
+                        logger.error(f"[Call {call_number}] Recording processor error: {e}")
 
             # Log conversation start
             conversation_logs.append(
@@ -936,6 +1001,9 @@ class TestExecutionService:
                     record_sent_callback=lambda audio: record_audio_bridge(audio, "target_to_user"),
                 )
             )
+
+            # Start the recording processor as a background task
+            recording_task = asyncio.create_task(process_recording_queue())
 
             # Wait for conversation to complete or timeout
             timeout_seconds = test_case.timeout_seconds or 300
@@ -979,6 +1047,15 @@ class TestExecutionService:
                 target_task.cancel()
                 user_task.cancel()
                 await asyncio.gather(target_task, user_task, return_exceptions=True)
+                # Wait for recording queue to drain (processor will exit when queue empty and stop_event set)
+                try:
+                    await asyncio.wait_for(recording_task, timeout=2.0)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"[Call {call_number}] Recording processor didn't finish in time, cancelling"
+                    )
+                    recording_task.cancel()
+                    await asyncio.gather(recording_task, return_exceptions=True)
 
             # If connection failed, return failure immediately
             if connection_failed:
@@ -996,8 +1073,8 @@ class TestExecutionService:
             audio_data = bytes(combined_audio_data)
 
             logger.info(
-                f"[Call {call_number}] Isolated conversation completed: {len(conversation_logs)} turns, "
-                f"{len(audio_data)} bytes audio, {len(isolated_pcm_frames)} PCM bytes, {conv_duration:.2f}s duration"
+                f"[Call {call_number}] Conversation completed: {chunks_recorded} chunks recorded, "
+                f"{len(audio_data)} bytes audio, {len(isolated_pcm_frames)} PCM bytes, {conv_duration:.2f}s"
             )
 
             return {
@@ -1147,8 +1224,6 @@ class TestExecutionService:
 
                     try:
                         while not stop_event.is_set():
-                            cycle_start = time.time()
-
                             # Maintain configurable cadence
                             next_tick += self.chunk_duration_seconds
                             sleep_time = next_tick - time.time()
@@ -1217,8 +1292,7 @@ class TestExecutionService:
                                 # Log if we're sending too much silence
                                 if silence_chunks_sent % 10 == 0:
                                     logger.warning(
-                                        f"[Target-WRITE] Sent {silence_chunks_sent} silence chunks vs "
-                                        f"{audio_chunks_sent} audio chunks"
+                                        f"[Target-WRITE] Sent {silence_chunks_sent} silence chunks vs {audio_chunks_sent} audio chunks"
                                     )
 
                             # Send media event with error handling
@@ -1403,8 +1477,6 @@ class TestExecutionService:
 
                     try:
                         while not stop_event.is_set():
-                            cycle_start = time.time()
-
                             # Maintain configurable cadence
                             next_tick += self.chunk_duration_seconds
                             sleep_time = next_tick - time.time()
@@ -1473,8 +1545,7 @@ class TestExecutionService:
                                 # Log if we're sending too much silence
                                 if silence_chunks_sent % 10 == 0:
                                     logger.warning(
-                                        f"[User-WRITE] Sent {silence_chunks_sent} silence chunks vs "
-                                        f"{audio_chunks_sent} audio chunks"
+                                        f"[User-WRITE] Sent {silence_chunks_sent} silence chunks vs {audio_chunks_sent} audio chunks"
                                     )
 
                             # Send media event with error handling
