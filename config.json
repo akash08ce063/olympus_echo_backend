@@ -6,5 +6,9 @@
 	"pranthora": {
 		"api_key": "a967a994b2ee02c0b4578e5e02bba7d3",
 		"base_url": "http://localhost:5050"
+	},
+	"audio": {
+		"chunk_duration_ms": 20,
+		"connection_sync_timeout_seconds": 10
 	}
 }
