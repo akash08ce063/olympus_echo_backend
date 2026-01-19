@@ -2,6 +2,7 @@
 Test execution API routes.
 
 This module provides REST API endpoints for running test cases and test suites.
+For test runs history, recordings, and transcripts, see test_runs_routes.py
 """
 
 from typing import Optional
@@ -13,7 +14,6 @@ from pydantic import BaseModel
 from services.test_execution_service import TestExecutionService
 from services.test_suite_service import TestSuiteService
 from services.test_case_service import TestCaseService
-from services.pranthora_api_client import PranthoraApiClient
 from telemetrics.logger import logger
 
 router = APIRouter(prefix="/test-execution", tags=["Test Execution"])
@@ -32,6 +32,7 @@ async def get_test_execution_service() -> TestExecutionService:
 class RunTestSuiteRequest(BaseModel):
     """Request model for running a test suite."""
     concurrent_calls: Optional[int] = Query(1, ge=1, le=10, description="Number of concurrent calls (overrides default)")
+    execution_mode: Optional[str] = Query("sequential", description="Execution mode: 'sequential' or 'parallel'")
 
 
 class RunTestCaseRequest(BaseModel):
@@ -53,7 +54,7 @@ async def run_test_suite(
     request: RunTestSuiteRequest,
     background_tasks: BackgroundTasks,
     user_id: UUID = Query(..., description="User ID who is running the test"),
-    request_obj: Request = None,  # Add request object to capture headers
+    request_obj: Request = None,
     service: TestExecutionService = Depends(get_test_execution_service),
 ):
     """
@@ -95,20 +96,36 @@ async def run_test_suite(
                 detail="No active test cases found in this test suite"
             )
 
-        # Get the request ID from header
-        request_id = request_obj.headers.get("x-pranthora-callid")
-        if not request_id:
+        # Get the request IDs from header (comma-separated for concurrent calls)
+        request_ids_header = request_obj.headers.get("x-pranthora-callid")
+        if not request_ids_header:
             raise HTTPException(
                 status_code=400,
                 detail="x-pranthora-callid header is required"
             )
+        
+        # Parse comma-separated request IDs
+        request_ids = [rid.strip() for rid in request_ids_header.split(",") if rid.strip()]
+        if not request_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="x-pranthora-callid header must contain at least one request ID"
+            )
 
         # Start the test execution
+        execution_mode = request.execution_mode or "sequential"
+        if execution_mode not in ["sequential", "parallel"]:
+            raise HTTPException(
+                status_code=400,
+                detail="execution_mode must be 'sequential' or 'parallel'"
+            )
+        
         test_run_id = await service.run_test_suite(
             test_suite_id=suite_id,
             user_id=user_id,
             concurrent_calls=request.concurrent_calls,
-            request_id=request_id
+            request_ids=request_ids,
+            execution_mode=execution_mode
         )
 
         return TestExecutionResponse(
@@ -120,7 +137,8 @@ async def run_test_suite(
                 "suite_id": str(suite_id),
                 "status": "running",
                 "total_test_cases": len(active_cases),
-                "concurrent_calls": request.concurrent_calls
+                "concurrent_calls": request.concurrent_calls,
+                "execution_mode": execution_mode
             }
         )
 
@@ -142,7 +160,7 @@ async def run_test_case(
     request: RunTestCaseRequest,
     background_tasks: BackgroundTasks,
     user_id: UUID = Query(..., description="User ID who is running the test"),
-    request_obj: Request = None,  # Add request object to capture headers
+    request_obj: Request = None,
     service: TestExecutionService = Depends(get_test_execution_service),
 ):
     """
@@ -188,12 +206,20 @@ async def run_test_case(
         finally:
             await test_case_service.close()
 
-        # Get the request ID from header
-        request_id = request_obj.headers.get("x-pranthora-callid")
-        if not request_id:
+        # Get the request IDs from header (comma-separated for concurrent calls)
+        request_ids_header = request_obj.headers.get("x-pranthora-callid")
+        if not request_ids_header:
             raise HTTPException(
                 status_code=400,
                 detail="x-pranthora-callid header is required"
+            )
+        
+        # Parse comma-separated request IDs
+        request_ids = [rid.strip() for rid in request_ids_header.split(",") if rid.strip()]
+        if not request_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="x-pranthora-callid header must contain at least one request ID"
             )
 
         # Start the test execution
@@ -201,7 +227,7 @@ async def run_test_case(
             test_case_id=case_id,
             user_id=user_id,
             concurrent_calls=request.concurrent_calls,
-            request_id=request_id
+            request_ids=request_ids
         )
 
         return TestExecutionResponse(
@@ -275,7 +301,6 @@ async def get_test_run_status(
                         "status": result.status,
                         "started_at": result.started_at,
                         "completed_at": result.completed_at,
-                        "recording_file_id": str(result.recording_file_id) if result.recording_file_id else None,
                         "error_message": result.error_message
                     }
                     for result in (test_run_with_results.test_case_results if test_run_with_results else [])
@@ -290,255 +315,3 @@ async def get_test_run_status(
     except Exception as e:
         logger.error(f"Error getting test run status: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get test run status: {str(e)}")
-
-
-@router.get("/runs")
-async def list_test_runs(
-    user_id: UUID = Query(..., description="User ID"),
-    suite_id: Optional[UUID] = Query(None, description="Filter by test suite ID"),
-    limit: int = Query(50, ge=1, le=100, description="Number of results to return"),
-    offset: int = Query(0, ge=0, description="Number of results to skip"),
-    service: TestExecutionService = Depends(get_test_execution_service),
-):
-    """
-    List test runs for a user.
-
-    Args:
-        user_id: User ID
-        suite_id: Optional test suite ID to filter by
-        limit: Maximum number of results
-        offset: Number of results to skip
-        service: Test execution service
-
-    Returns:
-        List of test runs
-    """
-    try:
-        from services.test_history_service import TestRunHistoryService
-
-        run_service = TestRunHistoryService()
-        try:
-            if suite_id:
-                # Filter by suite
-                runs = await run_service.get_test_runs_by_suite(suite_id, limit, offset)
-                # Filter by user access
-                runs = [run for run in runs if run.user_id == user_id]
-            else:
-                # Get all runs for user
-                runs = await run_service.get_test_runs_by_user(user_id, limit, offset)
-
-            return {
-                "total": len(runs),
-                "runs": [
-                    {
-                        "id": str(run.id),
-                        "test_suite_id": str(run.test_suite_id),
-                        "status": run.status,
-                        "started_at": run.started_at,
-                        "completed_at": run.completed_at,
-                        "total_test_cases": run.total_test_cases,
-                        "passed_count": run.passed_count,
-                        "failed_count": run.failed_count,
-                        "alert_count": run.alert_count
-                    }
-                    for run in runs
-                ]
-            }
-
-        finally:
-            await run_service.close()
-
-    except Exception as e:
-        logger.error(f"Error listing test runs: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to list test runs: {str(e)}")
-
-
-@router.get("/call-logs/{request_id}")
-async def get_call_logs_by_request_id(
-    request_id: str,
-    user_id: UUID = Query(..., description="User ID for authorization"),
-    service: TestExecutionService = Depends(get_test_execution_service),
-):
-    """
-    Get call logs/session transcripts for a test run by its request ID.
-
-    Args:
-        request_id: The request ID (same as test_run_history.id)
-        user_id: User ID for authorization
-        service: Test execution service
-
-    Returns:
-        Call session data including transcripts from Pranthora backend
-    """
-    try:
-        # First verify that the test run exists and user has access
-        from services.test_history_service import TestRunHistoryService
-
-        run_service = TestRunHistoryService()
-        try:
-            test_run = await run_service.get_test_run(request_id)
-            if not test_run:
-                raise HTTPException(status_code=404, detail=f"Test run '{request_id}' not found")
-
-            # Check user access
-            if test_run.user_id != user_id:
-                raise HTTPException(
-                    status_code=403,
-                    detail="You don't have permission to view call logs for this test run"
-                )
-
-        finally:
-            await run_service.close()
-
-        # Get call logs from Pranthora backend
-        async with PranthoraApiClient() as pranthora_client:
-            try:
-                # Call the Pranthora call-analytics endpoint to get call logs
-                response = await pranthora_client.client.get(
-                    f"{pranthora_client.base_url}/api/v1/call-analytics/call-logs/{request_id}",
-                    headers={
-                        "Authorization": f"Bearer {pranthora_client.api_key}",
-                        "Content-Type": "application/json"
-                    }
-                )
-
-                if response.status_code == 200:
-                    call_logs_data = response.json()
-                    return {
-                        "test_run_id": request_id,
-                        "call_logs": call_logs_data
-                    }
-                elif response.status_code == 404:
-                    return {
-                        "test_run_id": request_id,
-                        "call_logs": None,
-                        "message": "Call session not found - test may not have completed or may have failed"
-                    }
-                else:
-                    logger.error(f"Failed to get call logs from Pranthora: {response.status_code} - {response.text}")
-                    raise HTTPException(
-                        status_code=500,
-                        detail=f"Failed to retrieve call logs from Pranthora backend"
-                    )
-
-            except Exception as e:
-                logger.error(f"Error communicating with Pranthora backend: {e}")
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Failed to communicate with Pranthora backend: {str(e)}"
-                )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting call logs: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get call logs: {str(e)}")
-
-
-@router.get("/recording/{result_id}")
-async def get_recording_url(
-    result_id: UUID,
-    user_id: UUID = Query(..., description="User ID for authorization"),
-):
-    """
-    Get a signed URL for the recording file of a test case result.
-
-    Args:
-        result_id: Test case result ID
-        user_id: User ID for authorization
-
-    Returns:
-        Signed URL to download/play the recording
-    """
-    try:
-        from services.test_history_service import TestCaseResultService, TestRunHistoryService
-        from services.recording_storage_service import RecordingStorageService
-
-        result_service = TestCaseResultService()
-        run_service = TestRunHistoryService()
-        recording_service = RecordingStorageService()
-
-        try:
-            # Get the test case result
-            result = await result_service.get_by_id(result_id)
-            if not result:
-                raise HTTPException(status_code=404, detail=f"Test case result '{result_id}' not found")
-
-            # Verify user access via test run
-            test_run = await run_service.get_test_run(result.get('test_run_id'))
-            if not test_run or test_run.user_id != user_id:
-                raise HTTPException(status_code=403, detail="You don't have permission to access this recording")
-
-            # Get recording URL directly from database (now stored as JSON)
-            recording_file_url = result.get('recording_file_url')
-
-            if not recording_file_url:
-                raise HTTPException(status_code=404, detail="No recording file found for this test result")
-
-            return {
-                "result_id": str(result_id),
-                "test_case_id": str(result.get('test_case_id')),
-                "recording_url": recording_file_url,
-                "expires_in": 3600
-            }
-
-        finally:
-            await result_service.close()
-            await run_service.close()
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting recording URL: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get recording URL: {str(e)}")
-
-
-@router.get("/recordings/suite/{suite_id}")
-async def get_recordings_by_suite(
-    suite_id: UUID,
-    user_id: UUID = Query(..., description="User ID for authorization"),
-):
-    """Get all recording URLs for a test suite."""
-    try:
-        from services.test_suite_service import TestSuiteService
-        from services.recording_storage_service import RecordingStorageService
-        from supabase.client import acreate_client
-        from static_memory_cache import StaticMemoryCache
-
-        suite_service = TestSuiteService()
-        recording_service = RecordingStorageService()
-
-        try:
-            # Verify suite exists and user owns it
-            suite = await suite_service.get_test_suite(suite_id)
-            if not suite:
-                raise HTTPException(status_code=404, detail="Suite not found")
-         
-            # Get all results for this suite directly
-            db_config = StaticMemoryCache.get_database_config()
-            client = await acreate_client(db_config["supabase_url"], db_config["supabase_key"])
-            
-            results = await client.table('test_case_results').select(
-                'id, test_case_id, recording_file_url, status'
-            ).eq('test_suite_id', str(suite_id)).order('created_at', desc=True).execute()
-
-            recordings = []
-            for r in results.data or []:
-                if r.get('recording_file_url'):
-                    recordings.append({
-                        "result_id": r['id'],
-                        "test_case_id": r['test_case_id'],
-                        "recording_url": r['recording_file_url'],
-                        "status": r['status']
-                    })
-
-            return {"suite_id": str(suite_id), "recordings": recordings}
-
-        finally:
-            await suite_service.close()
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))

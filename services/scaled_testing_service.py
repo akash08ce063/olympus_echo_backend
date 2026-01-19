@@ -17,8 +17,9 @@ from typing import Optional
 
 import websockets
 from websockets.exceptions import ConnectionClosed
-from services.audio_converter import AudioConverter, EncodingType, SampleRateType
+from services.audio_converter import EncodingType, SampleRateType
 from services.recording_storage_service import RecordingStorageService
+from static_memory_cache import StaticMemoryCache
 from telemetrics.logger import logger
 
 
@@ -51,15 +52,12 @@ class ScaledTestingService:
         self.recording_path.mkdir(parents=True, exist_ok=True)
         self.recording_service = RecordingStorageService()
 
-        # Audio settings based on encoding
-        self.chunk_size = 160  # 20ms @ 8kHz default
-        if sample_rate == 8000:
-            self.chunk_size = 160
-        elif sample_rate == 16000:
-            self.chunk_size = 320
-        else:
-            # Calculate chunk size for 20ms
-            self.chunk_size = int(sample_rate * 0.02)
+        # Read chunk duration from config
+        chunk_duration_ms = StaticMemoryCache.get_audio_chunk_duration_ms()
+        self.chunk_duration_seconds = chunk_duration_ms / 1000.0
+
+        # Calculate chunk size based on sample rate and configurable duration
+        self.chunk_size = int(sample_rate * self.chunk_duration_seconds)
 
         # Silence byte based on encoding
         if encoding == "mulaw":
@@ -96,9 +94,7 @@ class ScaledTestingService:
         # Create tasks for all concurrent connections
         tasks = []
         for conn_num in range(concurrent_requests):
-            task = asyncio.create_task(
-                self._run_single_connection(conn_num, test_dir, timeout)
-            )
+            task = asyncio.create_task(self._run_single_connection(conn_num, test_dir, timeout))
             tasks.append(task)
 
         # Wait for all tasks or timeout
@@ -166,7 +162,7 @@ class ScaledTestingService:
                 else:
                     # For other PCM formats, assume it's already in correct format
                     pcm = audio_data
-                
+
                 pcm_frames.extend(pcm)
             except Exception as e:
                 logger.error(f"[Conn-{conn_num}] Recording error: {e}")
@@ -216,8 +212,9 @@ class ScaledTestingService:
             if pcm_frames:
                 # Convert PCM frames to WAV format
                 import io
+
                 wav_buffer = io.BytesIO()
-                with wave.open(wav_buffer, 'wb') as wav_file:
+                with wave.open(wav_buffer, "wb") as wav_file:
                     wav_file.setnchannels(1)  # Mono
                     wav_file.setsampwidth(2)  # 16-bit
                     wav_file.setframerate(self.sample_rate)
@@ -229,7 +226,7 @@ class ScaledTestingService:
                 recording_file_id = await self.recording_service.upload_recording_file(
                     file_content=wav_data,
                     file_name=f"connection_{conn_num}.wav",
-                    content_type="audio/wav"
+                    content_type="audio/wav",
                 )
 
                 if recording_file_id:
@@ -310,6 +307,9 @@ class ScaledTestingService:
                 logger.info(f"[{name}] Sent start event")
 
                 # -------- READ FROM AGENT --------
+                # Track last audio time for silence generation (only for target agent)
+                last_audio_time = [time.time()] if record_callback else None
+
                 async def read_from_ws():
                     try:
                         async for message in websocket:
@@ -326,14 +326,15 @@ class ScaledTestingService:
                                 # ✅ RECORD ONLY ON READ (from target agent)
                                 if record_callback:
                                     record_callback(audio_bytes)
+                                    # Update last audio time
+                                    if last_audio_time:
+                                        last_audio_time[0] = time.time()
 
                                 # Put audio in outgoing queue (no duplication)
                                 await outgoing_queue.put(audio_bytes)
 
                             elif event_type == "mark":
-                                logger.info(
-                                    f"[{name}] Mark: {data.get('mark', {}).get('name')}"
-                                )
+                                logger.info(f"[{name}] Mark: {data.get('mark', {}).get('name')}")
 
                             elif event_type == "clear":
                                 logger.info(f"[{name}] Clear received")
@@ -352,14 +353,50 @@ class ScaledTestingService:
                     except Exception as e:
                         logger.error(f"[{name}] Read error: {e}")
 
-                # -------- WRITE TO AGENT (20ms cadence) --------
+                # Continuous silence generator (only for target agent with record_callback)
+                silence_task = None
+                if record_callback and last_audio_time:
+
+                    async def generate_silence():
+                        """Generate silence chunks continuously when agent is silent."""
+                        next_tick = time.time()
+                        silence_threshold = 0.1  # 100ms threshold
+
+                        try:
+                            while not stop_event.is_set():
+                                next_tick += self.chunk_duration_seconds
+                                sleep_time = next_tick - time.time()
+                                if sleep_time > 0:
+                                    await asyncio.sleep(sleep_time)
+
+                                # Check if we've received audio recently
+                                time_since_audio = time.time() - last_audio_time[0]
+                                if time_since_audio > silence_threshold:
+                                    # Agent is silent, generate silence chunk
+                                    silence = self.silence_byte * self.chunk_size
+
+                                    # Record the silence chunk (for continuous recording)
+                                    if not stop_event.is_set():
+                                        record_callback(silence)
+
+                                    # Only add if queue isn't too full
+                                    if outgoing_queue.qsize() < 50:
+                                        await outgoing_queue.put(silence)
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception as e:
+                            logger.warning(f"[{name}] Silence generator error: {e}")
+
+                    silence_task = asyncio.create_task(generate_silence())
+
+                # -------- WRITE TO AGENT --------
                 async def write_to_ws():
                     stream_sid = f"stream_{call_sid}"
                     next_tick = time.time()
 
                     try:
                         while not stop_event.is_set():
-                            next_tick += 0.02
+                            next_tick += self.chunk_duration_seconds
                             sleep_time = next_tick - time.time()
                             if sleep_time > 0:
                                 await asyncio.sleep(sleep_time)
@@ -377,13 +414,19 @@ class ScaledTestingService:
                                 silence = self.silence_byte * self.chunk_size
                                 payload_b64 = base64.b64encode(silence).decode()
 
-                            media_event = {
-                                "event": "media",
-                                "streamSid": stream_sid,
-                                "media": {"payload": payload_b64},
-                            }
-
-                            await websocket.send(json.dumps(media_event))
+                            # Send with error handling to continue on failures
+                            try:
+                                media_event = {
+                                    "event": "media",
+                                    "streamSid": stream_sid,
+                                    "media": {"payload": payload_b64},
+                                }
+                                await websocket.send(json.dumps(media_event))
+                            except ConnectionClosed:
+                                logger.info(f"[{name}] WebSocket connection closed during write")
+                                break
+                            except Exception as send_error:
+                                logger.warning(f"[{name}] Send error (continuing): {send_error}")
 
                     except asyncio.CancelledError:
                         pass
@@ -395,8 +438,12 @@ class ScaledTestingService:
 
                 await reader_task
                 writer_task.cancel()
+                if silence_task:
+                    silence_task.cancel()
                 try:
                     await writer_task
+                    if silence_task:
+                        await silence_task
                 except asyncio.CancelledError:
                     pass
 

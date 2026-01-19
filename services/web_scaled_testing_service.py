@@ -20,6 +20,7 @@ import websockets
 from websockets.exceptions import ConnectionClosed
 
 from services.audio_converter import AudioConverter
+from static_memory_cache import StaticMemoryCache
 from telemetrics.logger import logger
 
 
@@ -48,16 +49,20 @@ class WebScaledTestingService:
         self.recording_path = Path(recording_path)
         self.recording_path.mkdir(parents=True, exist_ok=True)
 
+        # Read chunk duration from config
+        chunk_duration_ms = StaticMemoryCache.get_audio_chunk_duration_ms()
+        self.chunk_duration_seconds = chunk_duration_ms / 1000.0
+
         # Audio settings for media-stream (target agent)
-        self.target_chunk_size = 160  # 20ms @ 8kHz
         self.target_sample_rate = 8000
+        self.target_chunk_size = int(self.target_sample_rate * self.chunk_duration_seconds)
         self.target_silence_byte = b"\xff"  # μ-law silence
 
         # Audio settings for web-media-stream (user agent)
-        self.user_chunk_size = 320  # 20ms @ 16kHz = 320 samples
         self.user_sample_rate = 16000
-        # PCM16 silence: 320 samples * 2 bytes per sample = 640 bytes of zeros
-        self.user_silence_bytes = bytes(640)  # 640 bytes of zeros
+        self.user_chunk_size = int(self.user_sample_rate * self.chunk_duration_seconds)
+        # PCM16 silence: samples * 2 bytes per sample
+        self.user_silence_bytes = bytes(self.user_chunk_size * 2)
 
     async def run_concurrent_test(
         self,
@@ -88,9 +93,7 @@ class WebScaledTestingService:
         # Create tasks for all concurrent connections
         tasks = []
         for conn_num in range(concurrent_requests):
-            task = asyncio.create_task(
-                self._run_single_connection(conn_num, test_dir, timeout)
-            )
+            task = asyncio.create_task(self._run_single_connection(conn_num, test_dir, timeout))
             tasks.append(task)
 
         # Wait for all tasks or timeout
@@ -274,6 +277,9 @@ class WebScaledTestingService:
                 await websocket.send(json.dumps(start_event))
                 logger.info(f"[{name}] Sent start event")
 
+                # Track last audio time for silence generation
+                last_audio_time = [time.time()]
+
                 # -------- READ FROM AGENT --------
                 async def read_from_ws():
                     try:
@@ -291,6 +297,9 @@ class WebScaledTestingService:
                                 # ✅ RECORD ONLY ON READ (NO DUPLICATION)
                                 record_callback(ulaw_audio)
 
+                                # Update last audio time
+                                last_audio_time[0] = time.time()
+
                                 # Convert mulaw (8k) to PCM16 (16k) for user agent
                                 pcm_8k = audioop.ulaw2lin(ulaw_audio, 2)
                                 pcm_16k = AudioConverter.resample_audio(
@@ -303,9 +312,7 @@ class WebScaledTestingService:
                                 await outgoing_queue.put(pcm_16k)
 
                             elif event_type == "mark":
-                                logger.info(
-                                    f"[{name}] Mark: {data.get('mark', {}).get('name')}"
-                                )
+                                logger.info(f"[{name}] Mark: {data.get('mark', {}).get('name')}")
 
                             elif event_type == "clear":
                                 logger.info(f"[{name}] Clear received")
@@ -324,14 +331,54 @@ class WebScaledTestingService:
                     except Exception as e:
                         logger.error(f"[{name}] Read error: {e}")
 
-                # -------- WRITE TO AGENT (20ms) --------
+                # Continuous silence generator
+                async def generate_silence():
+                    """Generate silence chunks continuously when agent is silent."""
+                    next_tick = time.time()
+                    silence_threshold = 0.1  # 100ms threshold
+
+                    try:
+                        while not stop_event.is_set():
+                            next_tick += self.chunk_duration_seconds
+                            sleep_time = next_tick - time.time()
+                            if sleep_time > 0:
+                                await asyncio.sleep(sleep_time)
+
+                            # Check if we've received audio recently
+                            time_since_audio = time.time() - last_audio_time[0]
+                            if time_since_audio > silence_threshold:
+                                # Agent is silent, generate silence chunk
+                                silence_ulaw = self.target_silence_byte * self.target_chunk_size
+
+                                # Record the silence chunk (for continuous recording)
+                                if not stop_event.is_set():
+                                    record_callback(silence_ulaw)
+
+                                # Convert mulaw (8k) to PCM16 (16k) for user agent
+                                pcm_8k = audioop.ulaw2lin(silence_ulaw, 2)
+                                pcm_16k = AudioConverter.resample_audio(
+                                    pcm_8k,
+                                    from_sample_rate=self.target_sample_rate,
+                                    to_sample_rate=self.user_sample_rate,
+                                    sample_width=2,
+                                    encoding="pcm16",
+                                )
+                                # Only add if queue isn't too full
+                                if outgoing_queue.qsize() < 50:
+                                    await outgoing_queue.put(pcm_16k)
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as e:
+                        logger.warning(f"[{name}] Silence generator error: {e}")
+
+                # -------- WRITE TO AGENT --------
                 async def write_to_ws():
                     stream_sid = f"stream_{call_sid}"
                     next_tick = time.time()
 
                     try:
                         while not stop_event.is_set():
-                            next_tick += 0.02
+                            next_tick += self.chunk_duration_seconds
                             sleep_time = next_tick - time.time()
                             if sleep_time > 0:
                                 await asyncio.sleep(sleep_time)
@@ -356,18 +403,29 @@ class WebScaledTestingService:
 
                                 except asyncio.QueueEmpty:
                                     pass
+                                except Exception as queue_error:
+                                    logger.warning(
+                                        f"[{name}] Queue access error: {queue_error}, sending silence"
+                                    )
+                                    payload_b64 = None
 
                             if not payload_b64:
                                 silence = self.target_silence_byte * self.target_chunk_size
                                 payload_b64 = base64.b64encode(silence).decode()
 
-                            media_event = {
-                                "event": "media",
-                                "streamSid": stream_sid,
-                                "media": {"payload": payload_b64},
-                            }
-
-                            await websocket.send(json.dumps(media_event))
+                            # Send with error handling to continue on failures
+                            try:
+                                media_event = {
+                                    "event": "media",
+                                    "streamSid": stream_sid,
+                                    "media": {"payload": payload_b64},
+                                }
+                                await websocket.send(json.dumps(media_event))
+                            except ConnectionClosed:
+                                logger.info(f"[{name}] WebSocket connection closed during write")
+                                break
+                            except Exception as send_error:
+                                logger.warning(f"[{name}] Send error (continuing): {send_error}")
 
                     except asyncio.CancelledError:
                         pass
@@ -376,11 +434,14 @@ class WebScaledTestingService:
 
                 reader_task = asyncio.create_task(read_from_ws())
                 writer_task = asyncio.create_task(write_to_ws())
+                silence_task = asyncio.create_task(generate_silence())
 
                 await reader_task
                 writer_task.cancel()
+                silence_task.cancel()
                 try:
                     await writer_task
+                    await silence_task
                 except asyncio.CancelledError:
                     pass
 
@@ -426,15 +487,18 @@ class WebScaledTestingService:
                     logger.warning(f"[{name}] Timeout waiting for start_media_streaming")
 
                 # -------- READ FROM AGENT (raw PCM16 bytes) --------
+                # Track last audio time for silence generation
+                last_audio_time = [time.time()]
+
                 async def read_from_ws():
                     try:
                         while not stop_event.is_set():
                             try:
                                 # Receive raw PCM16 bytes (16kHz)
-                                audio_bytes = await asyncio.wait_for(
-                                    websocket.recv(), timeout=1.0
-                                )
+                                audio_bytes = await asyncio.wait_for(websocket.recv(), timeout=1.0)
                                 if isinstance(audio_bytes, bytes):
+                                    # Update last audio time
+                                    last_audio_time[0] = time.time()
                                     await outgoing_queue.put(audio_bytes)
                             except asyncio.TimeoutError:
                                 continue
@@ -444,13 +508,38 @@ class WebScaledTestingService:
                     except Exception as e:
                         logger.error(f"[{name}] Read error: {e}")
 
-                # -------- WRITE TO AGENT (raw PCM16 bytes, 20ms chunks) --------
+                # Continuous silence generator
+                async def generate_silence():
+                    """Generate silence chunks continuously when agent is silent."""
+                    next_tick = time.time()
+                    silence_threshold = 0.1  # 100ms threshold
+
+                    try:
+                        while not stop_event.is_set():
+                            next_tick += self.chunk_duration_seconds
+                            sleep_time = next_tick - time.time()
+                            if sleep_time > 0:
+                                await asyncio.sleep(sleep_time)
+
+                            # Check if we've received audio recently
+                            time_since_audio = time.time() - last_audio_time[0]
+                            if time_since_audio > silence_threshold:
+                                # Agent is silent, generate silence chunk (PCM16 16k)
+                                # Only add if queue isn't too full
+                                if outgoing_queue.qsize() < 50:
+                                    await outgoing_queue.put(self.user_silence_bytes)
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as e:
+                        logger.warning(f"[{name}] Silence generator error: {e}")
+
+                # -------- WRITE TO AGENT (raw PCM16 bytes) --------
                 async def write_to_ws():
                     next_tick = time.time()
 
                     try:
                         while not stop_event.is_set():
-                            next_tick += 0.02
+                            next_tick += self.chunk_duration_seconds
                             sleep_time = next_tick - time.time()
                             if sleep_time > 0:
                                 await asyncio.sleep(sleep_time)
@@ -460,15 +549,34 @@ class WebScaledTestingService:
                             if not incoming_queue.empty():
                                 try:
                                     audio_data = incoming_queue.get_nowait()
+                                    # Validate audio data size
+                                    expected_size = self.user_chunk_size * 2
+                                    if len(audio_data) != expected_size:
+                                        logger.warning(
+                                            f"[{name}] Unexpected audio chunk size: {len(audio_data)}, "
+                                            f"expected {expected_size}, sending silence"
+                                        )
+                                        audio_data = None
                                 except asyncio.QueueEmpty:
                                     pass
+                                except Exception as queue_error:
+                                    logger.warning(
+                                        f"[{name}] Queue access error: {queue_error}, sending silence"
+                                    )
+                                    audio_data = None
 
                             if not audio_data:
-                                # Send silence (PCM16, 16kHz, 20ms = 320 samples = 640 bytes)
+                                # Send silence (PCM16, 16kHz)
                                 audio_data = self.user_silence_bytes
 
-                            # Send raw PCM16 bytes
-                            await websocket.send(audio_data)
+                            # Send raw PCM16 bytes with error handling
+                            try:
+                                await websocket.send(audio_data)
+                            except ConnectionClosed:
+                                logger.info(f"[{name}] WebSocket connection closed during write")
+                                break
+                            except Exception as send_error:
+                                logger.warning(f"[{name}] Send error (continuing): {send_error}")
 
                     except asyncio.CancelledError:
                         pass
@@ -477,15 +585,17 @@ class WebScaledTestingService:
 
                 reader_task = asyncio.create_task(read_from_ws())
                 writer_task = asyncio.create_task(write_to_ws())
+                silence_task = asyncio.create_task(generate_silence())
 
                 await reader_task
                 writer_task.cancel()
+                silence_task.cancel()
                 try:
                     await writer_task
+                    await silence_task
                 except asyncio.CancelledError:
                     pass
 
         except Exception as e:
             logger.error(f"[{name}] Connection failed: {e}")
             raise
-
