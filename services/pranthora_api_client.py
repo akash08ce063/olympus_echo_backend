@@ -5,8 +5,7 @@ This module provides a client to interact with the Pranthora backend API
 for creating, updating, and managing agents.
 """
 
-import json
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 import httpx
 from pydantic import BaseModel, Field
 
