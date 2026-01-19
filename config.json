@@ -8,6 +8,7 @@
 		"base_url": "http://localhost:5050"
 	},
 	"audio": {
-		"chunk_duration_ms": 20
+		"chunk_duration_ms": 20,
+		"connection_sync_timeout_seconds": 10
 	}
 }

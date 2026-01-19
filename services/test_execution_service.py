@@ -6,8 +6,6 @@ simulate conversations, evaluate results, and store execution history.
 """
 
 import asyncio
-import json
-import base64
 import time
 import uuid
 import wave
@@ -18,12 +16,10 @@ from uuid import UUID, uuid4
 from datetime import datetime
 from pydantic import BaseModel, Field
 
-import websockets
-from websockets.exceptions import ConnectionClosedOK, ConnectionClosedError
-
 from services.database_service import DatabaseService
 from services.test_case_service import TestCaseService
 from services.test_suite_service import TestSuiteService
+from services.agent_connection_manager import AgentConnectionManager
 from services.target_agent_service import TargetAgentService
 from services.user_agent_service import UserAgentService
 from services.test_history_service import TestRunHistoryService, TestCaseResultService
@@ -76,6 +72,7 @@ class TestExecutionService:
 
         chunk_duration_ms = StaticMemoryCache.get_audio_chunk_duration_ms()
         self.chunk_duration_seconds = chunk_duration_ms / 1000.0
+        self.connection_sync_timeout = StaticMemoryCache.get_connection_sync_timeout_seconds()
 
     async def run_test_suite(
         self,
@@ -974,33 +971,41 @@ class TestExecutionService:
                 }
             )
 
-            # Start websocket connections for this conversation
-            target_task = asyncio.create_task(
-                self._connect_target_agent(
-                    target_ws_url,
-                    call_sid_target,
-                    target_to_user_queue,
-                    user_to_target_queue,
-                    stop_event,
-                    None,  # No longer recording what we receive (to avoid duplicates)
-                    conversation_logs,
-                    record_sent_callback=lambda audio: record_audio_bridge(audio, "user_to_target"),
-                )
-            )
+            # Synchronization: both connections must be ready before write loops start
+            target_ready = asyncio.Event()
+            user_ready = asyncio.Event()
 
-            user_task = asyncio.create_task(
-                self._connect_user_agent(
-                    user_ws_url,
-                    call_sid_user,
-                    target_to_user_queue,
-                    user_to_target_queue,
-                    stop_event,
-                    None,  # No longer recording what we receive (to avoid duplicates)
-                    conversation_logs,
-                    request_id,
-                    record_sent_callback=lambda audio: record_audio_bridge(audio, "target_to_user"),
-                )
+            # Start websocket connections for this conversation
+            # Target Agent Connection
+            target_manager = AgentConnectionManager(
+                name="Target",
+                ws_url=target_ws_url,
+                call_sid=call_sid_target,
+                incoming_queue=user_to_target_queue,  # Audio IN to this agent (read from other agent's output)
+                outgoing_queue=target_to_user_queue,  # Audio OUT from this agent (read from ws, put here)
+                stop_event=stop_event,
+                my_ready=target_ready,
+                other_ready=user_ready,
+                sync_timeout=self.connection_sync_timeout,
+                record_sent_callback=lambda audio: record_audio_bridge(audio, "user_to_target"),
             )
+            target_task = asyncio.create_task(target_manager.connect())
+
+            # User Agent Connection
+            user_manager = AgentConnectionManager(
+                name="User",
+                ws_url=user_ws_url,
+                call_sid=call_sid_user,
+                incoming_queue=target_to_user_queue,  # Audio IN to this agent (read from other agent's output)
+                outgoing_queue=user_to_target_queue,  # Audio OUT from this agent (read from ws, put here)
+                stop_event=stop_event,
+                my_ready=user_ready,
+                other_ready=target_ready,
+                sync_timeout=self.connection_sync_timeout,
+                extra_headers={"x-pranthora-callid": request_id} if request_id else None,
+                record_sent_callback=lambda audio: record_audio_bridge(audio, "target_to_user"),
+            )
+            user_task = asyncio.create_task(user_manager.connect())
 
             # Start the recording processor as a background task
             recording_task = asyncio.create_task(process_recording_queue())
@@ -1104,506 +1109,7 @@ class TestExecutionService:
                 "success": False,
             }
 
-    async def _connect_target_agent(
-        self,
-        ws_url: str,
-        call_sid: str,
-        outgoing_queue: asyncio.Queue,
-        incoming_queue: asyncio.Queue,
-        stop_event: asyncio.Event,
-        record_callback: callable,
-        conversation_logs: List[Dict[str, Any]],
-        record_sent_callback: Optional[callable] = None,
-    ):
-        """Connect to target agent websocket (media-stream endpoint)."""
-        logger.info(f"[Target] Connecting to {ws_url}")
-
-        try:
-            async with websockets.connect(ws_url) as websocket:
-                # Send start event
-                start_event = {
-                    "event": "start",
-                    "sequenceNumber": "1",
-                    "start": {
-                        "accountSid": "AC_SIMULATION",
-                        "callSid": call_sid,
-                        "streamSid": f"stream_{call_sid}",
-                        "tracks": ["inbound"],
-                        "customParameters": {},
-                    },
-                    "streamSid": f"stream_{call_sid}",
-                }
-                await websocket.send(json.dumps(start_event))
-                logger.info("[Target] Sent start event")
-
-                # State tracking for speaking detection - only logs on state changes
-                target_speaking = False
-                user_speaking = False
-                last_target_audio_time = None
-                last_user_audio_time = None
-                last_target_stop_time = None
-                last_user_stop_time = None
-                silence_timeout = 0.3  # 300ms of no audio = stopped speaking
-
-                # Read from target agent
-                async def read_from_ws():
-                    nonlocal target_speaking, last_target_audio_time, last_target_stop_time
-                    try:
-                        async for message in websocket:
-                            if stop_event.is_set():
-                                break
-
-                            data = json.loads(message)
-                            event_type = data.get("event")
-
-                            if event_type == "media":
-                                payload = data["media"]["payload"]
-                                audio_bytes = base64.b64decode(payload)
-
-                                current_time = time.time()
-
-                                # Only log when transitioning from not-speaking to speaking
-                                if not target_speaking:
-                                    gap = ""
-                                    if last_target_stop_time is not None:
-                                        gap = f" (gap: {current_time - last_target_stop_time:.3f}s)"
-                                    logger.info(f"[Target] Started speaking{gap}")
-                                    target_speaking = True
-
-                                last_target_audio_time = current_time
-
-                                # Send to user agent
-                                await outgoing_queue.put(audio_bytes)
-
-                                # Debug: Log queue depth after putting audio
-                                queue_depth = outgoing_queue.qsize()
-                                if queue_depth > 10:
-                                    logger.warning(
-                                        f"[Target-READ] Queue backing up: {queue_depth} items"
-                                    )
-
-                            elif event_type == "mark":
-                                logger.info(f"[Target] Mark: {data.get('mark', {}).get('name')}")
-                            elif event_type == "clear":
-                                logger.info("[Target] Clear received")
-                                # Clear incoming queue
-                                while not incoming_queue.empty():
-                                    try:
-                                        incoming_queue.get_nowait()
-                                    except asyncio.QueueEmpty:
-                                        break
-                            elif event_type == "stop":
-                                logger.info("[Target] Stop received")
-                                break
-                    except Exception as e:
-                        logger.error(f"[Target] Read error: {e}")
-
-                # Monitor for target agent stopping (silence detection) - only logs on transition
-                async def monitor_target_silence():
-                    nonlocal target_speaking, last_target_audio_time, last_target_stop_time
-                    while not stop_event.is_set():
-                        await asyncio.sleep(0.1)  # Check every 100ms
-                        if target_speaking and last_target_audio_time:
-                            current_time = time.time()
-                            if current_time - last_target_audio_time > silence_timeout:
-                                # Only log when transitioning from speaking to not-speaking
-                                logger.info("[Target] Stopped speaking")
-                                target_speaking = False
-                                last_target_stop_time = current_time
-                                last_target_audio_time = None  # Reset to prevent re-triggering
-
-                # Write to target agent
-                async def write_to_ws():
-                    nonlocal user_speaking, last_user_audio_time, last_user_stop_time
-                    stream_sid = f"stream_{call_sid}"
-                    next_tick = time.time()
-
-                    # Debug counters
-                    audio_chunks_sent = 0
-                    silence_chunks_sent = 0
-
-                    try:
-                        while not stop_event.is_set():
-                            # Maintain configurable cadence
-                            next_tick += self.chunk_duration_seconds
-                            sleep_time = next_tick - time.time()
-                            if sleep_time > 0:
-                                await asyncio.sleep(sleep_time)
-
-                            # Check cadence drift
-                            actual_time = time.time()
-                            drift_ms = (actual_time - next_tick) * 1000
-                            if abs(drift_ms) > 3:
-                                logger.warning(f"[Target-WRITE] Cadence drift: {drift_ms:.2f}ms")
-
-                            payload_to_send = None
-                            queue_depth_before = incoming_queue.qsize()
-
-                            # Try to get audio from user agent with small timeout to avoid race condition
-                            try:
-                                audio_data = await asyncio.wait_for(
-                                    incoming_queue.get(), timeout=self.chunk_duration_seconds + 0.01
-                                )
-
-                                # Record what we send to target agent (user's audio)
-                                if record_sent_callback:
-                                    record_sent_callback(audio_data)
-
-                                payload_to_send = base64.b64encode(audio_data).decode("utf-8")
-                                audio_chunks_sent += 1
-
-                                current_time = time.time()
-
-                                # Only log when transitioning from not-speaking to speaking
-                                if not user_speaking:
-                                    gap = ""
-                                    if last_user_stop_time is not None:
-                                        gap = f" (gap: {current_time - last_user_stop_time:.3f}s)"
-                                    logger.info(f"[User] Started speaking{gap}")
-                                    user_speaking = True
-
-                                last_user_audio_time = current_time
-
-                            except asyncio.TimeoutError:
-                                # No chunk arrived within timeout, will send silence
-                                logger.warning(
-                                    f"[Target-WRITE] ⚠️ TIMEOUT! Queue had {queue_depth_before} items. "
-                                    f"Sending SILENCE (break #{silence_chunks_sent + 1})"
-                                )
-                                pass
-                            except Exception as queue_error:
-                                logger.warning(
-                                    f"[Target] Queue access error: {queue_error}, sending silence"
-                                )
-                                payload_to_send = None
-
-                            # Send silence if no audio
-                            if not payload_to_send:
-                                chunk_size = int(8000 * self.chunk_duration_seconds)  # 8kHz
-                                silence = b"\xff" * chunk_size  # μ-law silence
-                                silence_chunks_sent += 1
-
-                                # Record silence we send to target agent
-                                if record_sent_callback:
-                                    record_sent_callback(silence)
-
-                                payload_to_send = base64.b64encode(silence).decode("utf-8")
-
-                                # Log if we're sending too much silence
-                                if silence_chunks_sent % 10 == 0:
-                                    logger.warning(
-                                        f"[Target-WRITE] Sent {silence_chunks_sent} silence chunks vs {audio_chunks_sent} audio chunks"
-                                    )
-
-                            # Send media event with error handling
-                            try:
-                                media_event = {
-                                    "event": "media",
-                                    "streamSid": stream_sid,
-                                    "media": {"payload": payload_to_send},
-                                }
-                                await websocket.send(json.dumps(media_event))
-                            except (ConnectionClosedOK, ConnectionClosedError):
-                                logger.info("[Target] WebSocket connection closed during write")
-                                break
-                            except Exception as send_error:
-                                logger.warning(f"[Target] Send error (continuing): {send_error}")
-
-                    except asyncio.CancelledError:
-                        pass
-                    except Exception as e:
-                        logger.error(f"[Target] Write error: {e}")
-
-                # Monitor for user agent stopping (silence detection) - only logs on transition
-                async def monitor_user_silence():
-                    nonlocal user_speaking, last_user_audio_time, last_user_stop_time
-                    while not stop_event.is_set():
-                        await asyncio.sleep(0.1)  # Check every 100ms
-                        if user_speaking and last_user_audio_time:
-                            current_time = time.time()
-                            if current_time - last_user_audio_time > silence_timeout:
-                                # Only log when transitioning from speaking to not-speaking
-                                logger.info("[User] Stopped speaking")
-                                user_speaking = False
-                                last_user_stop_time = current_time
-                                last_user_audio_time = None  # Reset to prevent re-triggering
-
-                reader_task = asyncio.create_task(read_from_ws())
-                writer_task = asyncio.create_task(write_to_ws())
-                target_silence_task = asyncio.create_task(monitor_target_silence())
-                user_silence_task = asyncio.create_task(monitor_user_silence())
-
-                await reader_task
-                writer_task.cancel()
-                target_silence_task.cancel()
-                user_silence_task.cancel()
-                try:
-                    await writer_task
-                    await target_silence_task
-                    await user_silence_task
-                except asyncio.CancelledError:
-                    pass
-
-        except Exception as e:
-            logger.error(f"[Target] Connection failed: {e}")
-            raise
-
-    async def _connect_user_agent(
-        self,
-        ws_url: str,
-        call_sid: str,
-        incoming_queue: asyncio.Queue,
-        outgoing_queue: asyncio.Queue,
-        stop_event: asyncio.Event,
-        record_callback: callable,
-        conversation_logs: List[Dict[str, Any]],
-        request_id: Optional[str] = None,
-        record_sent_callback: Optional[callable] = None,
-    ):
-        """Connect to user agent websocket (media-stream endpoint)."""
-        logger.info(f"[User] Connecting to {ws_url}")
-
-        # Add request_id to headers if provided
-        additional_headers = {}
-        if request_id:
-            additional_headers["x-pranthora-callid"] = request_id
-            logger.info(f"[User] Request ID: {request_id}")
-
-        try:
-            async with websockets.connect(
-                ws_url, additional_headers=additional_headers
-            ) as websocket:
-                # Send start event (Twilio-style)
-                start_event = {
-                    "event": "start",
-                    "sequenceNumber": "1",
-                    "start": {
-                        "accountSid": "AC_SIMULATION",
-                        "callSid": call_sid,
-                        "streamSid": f"stream_{call_sid}",
-                        "tracks": ["inbound"],
-                        "customParameters": {},
-                    },
-                    "streamSid": f"stream_{call_sid}",
-                }
-                await websocket.send(json.dumps(start_event))
-                logger.info("[User] Sent start event")
-
-                # State tracking for speaking detection - only logs on state changes
-                user_speaking = False
-                target_speaking = False
-                last_user_audio_time = None
-                last_target_audio_time = None
-                last_user_stop_time = None
-                last_target_stop_time = None
-                silence_timeout = 0.3  # 300ms of no audio = stopped speaking
-
-                # Read from user agent (JSON messages)
-                async def read_from_ws():
-                    nonlocal user_speaking, last_user_audio_time, last_user_stop_time
-                    try:
-                        async for message in websocket:
-                            if stop_event.is_set():
-                                break
-
-                            data = json.loads(message)
-                            event_type = data.get("event")
-
-                            if event_type == "media":
-                                payload = data["media"]["payload"]
-                                audio_bytes = base64.b64decode(payload)
-
-                                current_time = time.time()
-
-                                # Only log when transitioning from not-speaking to speaking
-                                if not user_speaking:
-                                    gap = ""
-                                    if last_user_stop_time is not None:
-                                        gap = f" (gap: {current_time - last_user_stop_time:.3f}s)"
-                                    logger.info(f"[User] Started speaking{gap}")
-                                    user_speaking = True
-
-                                last_user_audio_time = current_time
-
-                                # Send to target agent
-                                await outgoing_queue.put(audio_bytes)
-
-                                # Debug: Log queue depth after putting audio
-                                queue_depth = outgoing_queue.qsize()
-                                if queue_depth > 10:
-                                    logger.warning(
-                                        f"[User-READ] Queue backing up: {queue_depth} items"
-                                    )
-
-                            elif event_type == "mark":
-                                logger.info(f"[User] Mark: {data.get('mark', {}).get('name')}")
-                            elif event_type == "clear":
-                                logger.info("[User] Clear received")
-                                # Clear incoming queue
-                                while not incoming_queue.empty():
-                                    try:
-                                        incoming_queue.get_nowait()
-                                    except asyncio.QueueEmpty:
-                                        break
-                            elif event_type == "stop":
-                                logger.info("[User] Stop received")
-                                break
-                    except Exception as e:
-                        logger.error(f"[User] Read error: {e}")
-
-                # Monitor for user agent stopping (silence detection) - only logs on transition
-                async def monitor_user_silence():
-                    nonlocal user_speaking, last_user_audio_time, last_user_stop_time
-                    while not stop_event.is_set():
-                        await asyncio.sleep(0.1)  # Check every 100ms
-                        if user_speaking and last_user_audio_time:
-                            current_time = time.time()
-                            if current_time - last_user_audio_time > silence_timeout:
-                                # Only log when transitioning from speaking to not-speaking
-                                logger.info("[User] Stopped speaking")
-                                user_speaking = False
-                                last_user_stop_time = current_time
-                                last_user_audio_time = None  # Reset to prevent re-triggering
-
-                # Write to user agent (JSON media events)
-                async def write_to_ws():
-                    nonlocal target_speaking, last_target_audio_time, last_target_stop_time
-                    stream_sid = f"stream_{call_sid}"
-                    next_tick = time.time()
-
-                    # Debug counters
-                    audio_chunks_sent = 0
-                    silence_chunks_sent = 0
-
-                    try:
-                        while not stop_event.is_set():
-                            # Maintain configurable cadence
-                            next_tick += self.chunk_duration_seconds
-                            sleep_time = next_tick - time.time()
-                            if sleep_time > 0:
-                                await asyncio.sleep(sleep_time)
-
-                            # Check cadence drift
-                            actual_time = time.time()
-                            drift_ms = (actual_time - next_tick) * 1000
-                            if abs(drift_ms) > 3:
-                                logger.warning(f"[User-WRITE] Cadence drift: {drift_ms:.2f}ms")
-
-                            payload_to_send = None
-                            queue_depth_before = incoming_queue.qsize()
-
-                            # Try to get audio from target agent with small timeout to avoid race condition
-                            try:
-                                audio_data = await asyncio.wait_for(
-                                    incoming_queue.get(), timeout=self.chunk_duration_seconds + 0.01
-                                )
-
-                                # Record what we send to user agent (target's audio)
-                                if record_sent_callback:
-                                    record_sent_callback(audio_data)
-
-                                payload_to_send = base64.b64encode(audio_data).decode("utf-8")
-                                audio_chunks_sent += 1
-
-                                current_time = time.time()
-
-                                # Only log when transitioning from not-speaking to speaking
-                                if not target_speaking:
-                                    gap = ""
-                                    if last_target_stop_time is not None:
-                                        gap = f" (gap: {current_time - last_target_stop_time:.3f}s)"
-                                    logger.info(f"[Target] Started speaking{gap}")
-                                    target_speaking = True
-
-                                last_target_audio_time = current_time
-
-                            except asyncio.TimeoutError:
-                                # No chunk arrived within timeout, will send silence
-                                logger.warning(
-                                    f"[User-WRITE] ⚠️ TIMEOUT! Queue had {queue_depth_before} items. "
-                                    f"Sending SILENCE (break #{silence_chunks_sent + 1})"
-                                )
-                                pass
-                            except Exception as queue_error:
-                                logger.warning(
-                                    f"[User] Queue access error: {queue_error}, sending silence"
-                                )
-                                payload_to_send = None
-
-                            # Send silence if no audio
-                            if not payload_to_send:
-                                chunk_size = int(8000 * self.chunk_duration_seconds)  # 8kHz
-                                silence = b"\xff" * chunk_size  # μ-law silence
-                                silence_chunks_sent += 1
-
-                                # Record silence we send to user agent
-                                if record_sent_callback:
-                                    record_sent_callback(silence)
-
-                                payload_to_send = base64.b64encode(silence).decode("utf-8")
-
-                                # Log if we're sending too much silence
-                                if silence_chunks_sent % 10 == 0:
-                                    logger.warning(
-                                        f"[User-WRITE] Sent {silence_chunks_sent} silence chunks vs {audio_chunks_sent} audio chunks"
-                                    )
-
-                            # Send media event with error handling
-                            try:
-                                media_event = {
-                                    "event": "media",
-                                    "streamSid": stream_sid,
-                                    "media": {"payload": payload_to_send},
-                                }
-                                await websocket.send(json.dumps(media_event))
-                            except (ConnectionClosedOK, ConnectionClosedError):
-                                logger.info("[User] WebSocket connection closed during write")
-                                break
-                            except Exception as send_error:
-                                logger.warning(f"[User] Send error (continuing): {send_error}")
-
-                    except asyncio.CancelledError:
-                        pass
-                    except (ConnectionClosedOK, ConnectionClosedError):
-                        # Normal websocket closure or clean disconnect - not an error
-                        logger.debug("[User] WebSocket closed normally")
-                        pass
-                    except Exception as e:
-                        logger.error(f"[User] Write error: {e}")
-
-                # Monitor for target agent stopping (silence detection) - only logs on transition
-                async def monitor_target_silence():
-                    nonlocal target_speaking, last_target_audio_time, last_target_stop_time
-                    while not stop_event.is_set():
-                        await asyncio.sleep(0.1)  # Check every 100ms
-                        if target_speaking and last_target_audio_time:
-                            current_time = time.time()
-                            if current_time - last_target_audio_time > silence_timeout:
-                                # Only log when transitioning from speaking to not-speaking
-                                logger.info("[Target] Stopped speaking")
-                                target_speaking = False
-                                last_target_stop_time = current_time
-                                last_target_audio_time = None  # Reset to prevent re-triggering
-
-                reader_task = asyncio.create_task(read_from_ws())
-                writer_task = asyncio.create_task(write_to_ws())
-                user_silence_task = asyncio.create_task(monitor_user_silence())
-                target_silence_task = asyncio.create_task(monitor_target_silence())
-
-                await reader_task
-                writer_task.cancel()
-                user_silence_task.cancel()
-                target_silence_task.cancel()
-                try:
-                    await writer_task
-                    await user_silence_task
-                    await target_silence_task
-                except asyncio.CancelledError:
-                    pass
-
-        except Exception as e:
-            logger.error(f"[User] Connection failed: {e}")
-            raise
+    # _connect_target_agent and _connect_user_agent removed in favor of AgentConnectionManager
 
     async def _evaluate_test_results_sequential(
         self,

@@ -83,6 +83,11 @@ class StaticMemoryCache:
         return float(cls.get_config("audio", "chunk_duration_ms"))
 
     @classmethod
+    def get_connection_sync_timeout_seconds(cls) -> float:
+        """Get connection sync timeout in seconds from config."""
+        return float(cls.get_config("audio", "connection_sync_timeout_seconds", 10.0))
+
+    @classmethod
     def is_initialized(cls) -> bool:
         """Check if cache has been initialized."""
         return cls._initialized
