@@ -37,7 +37,7 @@ def main():
 
     # Get configuration from environment variables
     host = os.getenv("HOST", "0.0.0.0")
-    port = int(os.getenv("PORT", "8080"))
+    port = int(os.getenv("PORT", "6068"))
     workers = int(os.getenv("WORKERS", "1"))
     reload = os.getenv("RELOAD", "false").lower() == "true"
 

@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  olympus-echo-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "6068:6068"
+    environment:
+      - PORT=6068
+      - HOST=0.0.0.0
+      - WORKERS=1
+      - RELOAD=false
+    volumes:
+      - ./logs:/usr/src/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6068/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - olympus-network
+
+networks:
+  olympus-network:
+    driver: bridge
