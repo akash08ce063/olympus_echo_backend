@@ -28,7 +28,9 @@ async def list_test_runs(
     offset: int = Query(0, ge=0, description="Number of results to skip"),
 ):
     """
-    List test runs for a user, grouped by test_run_id with all test case results and concurrent calls.
+    List test runs for a user, grouped by test_run_id with all test case results.
+    Uses RPC function for fast single-query data fetching.
+    Transcripts are lazy-loaded and not included in this response.
 
     Args:
         user_id: User ID
@@ -37,127 +39,69 @@ async def list_test_runs(
         offset: Number of results to skip
 
     Returns:
-        Grouped test runs with test case results, recordings, and transcripts
+        Grouped test runs with test case results and recordings (no transcripts)
     """
-    from supabase.client import acreate_client
     from data_layer.supabase_client import get_supabase_client
 
-    run_service = TestRunHistoryService()
+    supabase_client = await get_supabase_client()
 
     try:
+        # Use RPC function to fetch all data in a single optimized query
+        rpc_params = {
+            "p_user_id": str(user_id),
+            "p_limit": limit,
+            "p_offset": offset,
+        }
         if suite_id:
-            runs = await run_service.get_test_runs_by_suite(suite_id, limit, offset)
-            runs = [run for run in runs if run.user_id == user_id]
+            rpc_params["p_suite_id"] = str(suite_id)
         else:
-            runs = await run_service.get_test_runs_by_user(user_id, limit, offset)
+            rpc_params["p_suite_id"] = None
 
-        # Get database client for direct queries
-        db_config = StaticMemoryCache.get_database_config()
-        client = await acreate_client(db_config["supabase_url"], db_config["supabase_key"])
-        supabase_client = await get_supabase_client()
+        logger.info(f"Calling RPC function get_test_runs_with_results with params: {rpc_params}")
+        rpc_results = await supabase_client.call_rpc_function(
+            "get_test_runs_with_results", rpc_params
+        )
 
-        # Fetch all test case results in a single query using IN clause
-        run_ids = [str(run.id) for run in runs]
-
-        if not run_ids:
+        if not rpc_results:
             return {"total": 0, "runs": []}
 
-        try:
-            all_results_resp = (
-                await client.table("test_case_results")
-                .select(
-                    "id, test_case_id, test_suite_id, status, test_run_id, concurrent_calls, recording_file_url, error_message, evaluation_result, conversation_logs, started_at, completed_at"
-                )
-                .in_("test_run_id", run_ids)
-                .order("created_at", desc=False)
-                .execute()
-            )
+        # Group results by run_id
+        runs_map = {}
+        for row in rpc_results:
+            run_id = str(row["run_id"])
+            
+            # Initialize run if not exists
+            if run_id not in runs_map:
+                runs_map[run_id] = {
+                    "id": run_id,
+                    "test_suite_id": str(row["test_suite_id"]) if row["test_suite_id"] else None,
+                    "status": row["status"],
+                    "started_at": row["started_at"],
+                    "completed_at": row["completed_at"],
+                    "total_test_cases": row["total_test_cases"],
+                    "passed_count": row["passed_count"],
+                    "failed_count": row["failed_count"],
+                    "alert_count": row["alert_count"],
+                    "test_case_results": [],
+                }
 
-            all_results = all_results_resp.data or []
+            # Add test case result if exists
+            if row["result_id"]:
+                test_case_result = {
+                    "result_id": str(row["result_id"]),
+                    "test_case_id": str(row["test_case_id"]) if row["test_case_id"] else None,
+                    "concurrent_calls": row["concurrent_calls"] or 1,
+                    "call_recordings": [],
+                    "recording_url": row["recording_file_url"],
+                    "status": row["result_status"],
+                    "error_message": row["error_message"],
+                    "evaluation_result": row["evaluation_result"],
+                    "started_at": row["result_started_at"],
+                    "completed_at": row["result_completed_at"],
+                }
 
-            # Group results by test_run_id in Python
-            test_case_results_map = defaultdict(list)
-            for r in all_results:
-                test_case_results_map[r["test_run_id"]].append(r)
-
-            logger.info(
-                f"Fetched {len(all_results)} test case results for {len(run_ids)} test runs in single query"
-            )
-        except Exception as e:
-            logger.error(f"Failed to fetch test case results: {e}")
-            test_case_results_map = defaultdict(list)
-
-        # Helper function to generate signed URLs in parallel
-        async def generate_signed_url(file_path: str, call_num: int, file_id: str):
-            """Generate a signed URL for a recording file."""
-            try:
-                signed_url = await supabase_client.create_signed_url(
-                    "recording_files", file_path, 3600
-                )
-                if signed_url:
-                    return {
-                        "call_number": call_num,
-                        "recording_url": signed_url,
-                        "file_id": file_id,
-                    }
-                return None
-            except Exception as e:
-                logger.warning(f"Failed to generate URL for call {call_num}: {e}")
-                return None
-
-        # Helper function to fetch a single transcript
-        async def fetch_transcript(result_id: str):
-            """Fetch transcript for a single test case result."""
-            try:
-                async with PranthoraApiClient() as pranthora_client:
-                    call_logs = await pranthora_client.get_call_logs(result_id)
-                    if call_logs and call_logs.get("call_transcript"):
-                        logger.debug(
-                            f"✅ Successfully fetched transcript for test_case_result {result_id}: {len(call_logs.get('call_transcript', []))} messages"
-                        )
-                        return result_id, {
-                            "request_id": call_logs.get("request_id"),
-                            "id": call_logs.get("id"),
-                            "call_transcript": call_logs.get("call_transcript", []),
-                            "duration_seconds": call_logs.get("call_duration"),
-                            "created_at": call_logs.get("created_at"),
-                        }
-                    else:
-                        logger.debug(f"No transcript found for test_case_result {result_id}")
-                        return result_id, None
-            except Exception as e:
-                logger.warning(
-                    f"❌ Failed to fetch transcript for test_case_result {result_id}: {e}"
-                )
-                return result_id, None
-
-        # Collect all result IDs that need transcripts
-        all_result_ids = []
-        for run in runs:
-            run_id = str(run.id)
-            results = test_case_results_map.get(run_id, [])
-            for r in results:
-                all_result_ids.append(r["id"])
-
-        # Fetch all transcripts in parallel
-        logger.info(f"Fetching {len(all_result_ids)} transcripts in parallel...")
-        transcript_tasks = [fetch_transcript(result_id) for result_id in all_result_ids]
-        transcript_results = await asyncio.gather(*transcript_tasks)
-        transcripts_map = {result_id: transcript for result_id, transcript in transcript_results}
-
-        # Group runs with their test case results
-        grouped_runs = []
-
-        for run in runs:
-            run_id = str(run.id)
-            results = test_case_results_map.get(run_id, [])
-
-            test_case_results = []
-
-            for r in results:
-                test_case_id = r["test_case_id"]
-                # Extract wav_file_ids from conversation_logs metadata
-                conversation_logs = r.get("conversation_logs", []) or []
+                # Extract wav_file_ids from conversation_logs for signed URL generation
+                conversation_logs = row.get("conversation_logs", []) or []
                 wav_file_ids = []
                 if isinstance(conversation_logs, list):
                     for log_entry in conversation_logs:
@@ -168,70 +112,83 @@ async def list_test_runs(
                         ):
                             wav_file_ids = log_entry.get("wav_file_ids", [])
                             break
-                concurrent_calls = r.get("concurrent_calls", 1) or 1
 
-                # Build call_recordings array for all concurrent calls
-                call_recordings = []
-                call_transcripts = []
-
-                # Get transcript from the parallel fetch results
-                result_id = r["id"]
-                transcript_data = transcripts_map.get(result_id)
-                if transcript_data:
-                    call_transcripts.append(transcript_data)
-
+                # If we have wav_file_ids, we'll generate signed URLs in batch
                 if wav_file_ids and len(wav_file_ids) > 0:
-                    # Generate all signed URLs in parallel
-                    url_tasks = []
+                    test_case_result["wav_file_ids"] = wav_file_ids
+                    test_case_result["test_case_id_for_urls"] = str(row["test_case_id"])
+
+                runs_map[run_id]["test_case_results"].append(test_case_result)
+
+        # Batch generate all signed URLs in parallel
+        all_url_tasks = []
+        url_task_metadata = []  # Track metadata for each URL task in order
+
+        for run_id, run_data in runs_map.items():
+            for result in run_data["test_case_results"]:
+                if "wav_file_ids" in result:
+                    test_case_id = result["test_case_id_for_urls"]
+                    wav_file_ids = result["wav_file_ids"]
+                    
                     for idx, file_id in enumerate(wav_file_ids):
                         call_num = idx + 1
                         file_name = f"test_case_{test_case_id}_call_{call_num}_recording.wav"
                         file_path = f"{file_id}_{file_name}"
-                        url_tasks.append(generate_signed_url(file_path, call_num, file_id))
+                        
+                        # Store metadata for this task
+                        url_task_metadata.append({
+                            "run_id": run_id,
+                            "result_id": result["result_id"],
+                            "call_num": call_num,
+                            "file_id": file_id,
+                        })
+                        
+                        all_url_tasks.append(
+                            supabase_client.create_signed_url("recording_files", file_path, 3600)
+                        )
 
-                    signed_url_results = await asyncio.gather(*url_tasks)
+        # Execute all URL generation tasks in parallel
+        if all_url_tasks:
+            logger.info(f"Generating {len(all_url_tasks)} signed URLs in parallel...")
+            signed_urls = await asyncio.gather(*all_url_tasks, return_exceptions=True)
 
-                    # Process results and build call_recordings
-                    for idx, signed_url_result in enumerate(signed_url_results):
-                        if signed_url_result:
-                            call_recordings.append(signed_url_result)
-                elif r.get("recording_file_url"):
-                    call_recordings.append(
-                        {"call_number": 1, "recording_url": r["recording_file_url"]}
-                    )
+            # Group URLs by result_id
+            result_urls_map = defaultdict(list)
+            for idx, signed_url in enumerate(signed_urls):
+                if idx < len(url_task_metadata):
+                    metadata = url_task_metadata[idx]
+                    if signed_url and not isinstance(signed_url, Exception):
+                        result_urls_map[metadata["result_id"]].append({
+                            "call_number": metadata["call_num"],
+                            "recording_url": signed_url,
+                            "file_id": metadata["file_id"],
+                        })
 
-                test_case_results.append(
-                    {
-                        "result_id": r["id"],
-                        "test_case_id": test_case_id,
-                        "concurrent_calls": concurrent_calls,
-                        "call_recordings": call_recordings,
-                        "call_transcripts": call_transcripts,
-                        "recording_url": (
+            # Map URLs back to results
+            for run_id, run_data in runs_map.items():
+                for result in run_data["test_case_results"]:
+                    if "wav_file_ids" in result:
+                        result_id = result["result_id"]
+                        call_recordings = result_urls_map.get(result_id, [])
+                        
+                        # Sort by call number
+                        call_recordings.sort(key=lambda x: x["call_number"])
+                        
+                        result["call_recordings"] = call_recordings
+                        result["recording_url"] = (
                             call_recordings[0]["recording_url"] if call_recordings else None
-                        ),
-                        "status": r["status"],
-                        "error_message": r.get("error_message"),
-                        "evaluation_result": r.get("evaluation_result"),
-                        "started_at": r.get("started_at"),
-                        "completed_at": r.get("completed_at"),
-                    }
-                )
+                        )
+                        
+                        # Clean up temporary fields
+                        result.pop("wav_file_ids", None)
+                        result.pop("test_case_id_for_urls", None)
 
-            grouped_runs.append(
-                {
-                    "id": run_id,
-                    "test_suite_id": str(run.test_suite_id),
-                    "status": run.status,
-                    "started_at": run.started_at,
-                    "completed_at": run.completed_at,
-                    "total_test_cases": run.total_test_cases,
-                    "passed_count": run.passed_count,
-                    "failed_count": run.failed_count,
-                    "alert_count": run.alert_count,
-                    "test_case_results": test_case_results,
-                }
-            )
+        # Convert runs_map to list
+        grouped_runs = list(runs_map.values())
+
+        logger.info(
+            f"✅ Fetched {len(grouped_runs)} test runs with results using RPC function in milliseconds"
+        )
 
         return {"total": len(grouped_runs), "runs": grouped_runs}
 
@@ -240,8 +197,6 @@ async def list_test_runs(
     except Exception as e:
         logger.error(f"Error listing test runs: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to list test runs: {str(e)}")
-    finally:
-        await run_service.close()
 
 
 @router.get("/call-logs/{request_id}")
