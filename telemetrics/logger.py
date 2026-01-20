@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     from rich.console import Console
     from rich.logging import RichHandler
-    from rich.text import Text
+
     RICH_AVAILABLE = True
 except ImportError:
     RICH_AVAILABLE = False
@@ -34,9 +34,9 @@ class RichLogger:
         if RICH_AVAILABLE:
             rich_handler = RichHandler(
                 console=self.console,
-                show_time=True,
-                show_level=True,
-                show_path=True,
+                show_time=False,  # We format time ourselves
+                show_level=True,  # Keep RichHandler's level display
+                show_path=True,  # We'll override pathname/lineno in formatter
                 enable_link_path=False,
                 markup=True,
                 rich_tracebacks=True,
@@ -61,13 +61,14 @@ class RichLogger:
         log_dir.mkdir(exist_ok=True)
 
         log_file = log_dir / f"{self.name}_{datetime.now().strftime('%Y%m%d')}.log"
-        file_handler = logging.FileHandler(log_file, encoding='utf-8')
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
         file_handler.setLevel(level)
         file_handler.setFormatter(self._get_file_formatter())
         self.logger.addHandler(file_handler)
 
     def _get_rich_formatter(self):
         """Rich formatter for console output."""
+
         class RichFormatter(logging.Formatter):
             def __init__(self, logger_instance):
                 super().__init__()
@@ -80,30 +81,31 @@ class RichLogger:
                 record.thread_id = threading.get_ident()
                 record.tag = getattr(record, "tag", None)
 
-                # Get caller context
-                context = self.logger_instance._get_caller_context()
-                record.caller_module = context["module"]
-                record.caller_funcName = context["funcName"]
-                record.caller_lineno = context["lineno"]
+                # Use caller context from extra (already set in _prepare_log_message)
+                # Fallback to _get_caller_context if not present (for direct logger calls)
+                if not hasattr(record, "caller_module"):
+                    context = self.logger_instance._get_caller_context()
+                    record.caller_module = context["module"]
+                    record.caller_funcName = context["funcName"]
+                    record.caller_lineno = context["lineno"]
+                    record.caller_filename = context["filename"]
+
+                # Override pathname and lineno so RichHandler shows the actual caller location
+                if hasattr(record, "caller_filename") and hasattr(record, "caller_lineno"):
+                    # Extract just the filename from the full path for cleaner display
+                    caller_filename = getattr(record, "caller_filename", "")
+                    if caller_filename and caller_filename != "unknown":
+                        # Get just the filename (e.g., "/path/to/api/app.py" -> "app.py")
+                        filename = os.path.basename(caller_filename)
+                        record.pathname = filename
+                        record.lineno = record.caller_lineno
 
                 # Create rich text with colors and formatting
                 timestamp = datetime.fromtimestamp(record.created).strftime("%H:%M:%S.%f")[:-3]
 
-                # Color mapping for levels
-                level_colors = {
-                    "DEBUG": "cyan",
-                    "INFO": "green",
-                    "WARNING": "yellow",
-                    "ERROR": "red",
-                    "CRITICAL": "red bold",
-                }
-
-                level_color = level_colors.get(record.levelname, "white")
-
-                # Build the formatted message
+                # Build the formatted message (without [INFO] - RichHandler adds that)
                 parts = [
                     f"[{timestamp}]",
-                    f"[{record.levelname}]",
                     f"[{record.caller_module}:{record.caller_funcName}:{record.caller_lineno}]",
                 ]
 
@@ -113,7 +115,14 @@ class RichLogger:
                 if record.tag:
                     parts.append(f"[{record.tag}]")
 
-                parts.append(record.getMessage())
+                message = record.getMessage()
+
+                # Remove [INFO] if RichHandler added it (it shouldn't, but check anyway)
+                # RichHandler displays level separately, so message shouldn't have [INFO]
+                if message.startswith("[INFO]"):
+                    message = message[6:].lstrip()
+
+                parts.append(message)
 
                 formatted = " ".join(parts)
 
@@ -123,11 +132,12 @@ class RichLogger:
 
     def _get_basic_formatter(self):
         """Basic formatter for fallback when rich is not available."""
+
         class BasicFormatter(logging.Formatter):
             def __init__(self, logger_instance):
                 super().__init__(
                     fmt="%(asctime)s [%(levelname)s] %(caller_module)s:%(caller_funcName)s:%(caller_lineno)d %(message)s",
-                    datefmt="%H:%M:%S"
+                    datefmt="%H:%M:%S",
                 )
                 self.logger_instance = logger_instance
 
@@ -138,11 +148,13 @@ class RichLogger:
                 record.thread_id = threading.get_ident()
                 record.tag = getattr(record, "tag", None)
 
-                # Get caller context
-                context = self.logger_instance._get_caller_context()
-                record.caller_module = context["module"]
-                record.caller_funcName = context["funcName"]
-                record.caller_lineno = context["lineno"]
+                # Use caller context from extra (already set in _prepare_log_message)
+                # Fallback to _get_caller_context if not present (for direct logger calls)
+                if not hasattr(record, "caller_module"):
+                    context = self.logger_instance._get_caller_context()
+                    record.caller_module = context["module"]
+                    record.caller_funcName = context["funcName"]
+                    record.caller_lineno = context["lineno"]
 
                 formatted = super().format(record)
 
@@ -158,11 +170,12 @@ class RichLogger:
 
     def _get_file_formatter(self):
         """Formatter for file output."""
+
         class FileFormatter(logging.Formatter):
             def __init__(self, logger_instance):
                 super().__init__(
                     fmt="%(asctime)s [%(levelname)s] %(caller_module)s:%(caller_funcName)s:%(caller_lineno)d [PID:%(process_id)s] [TID:%(thread_id)s] %(message)s",
-                    datefmt="%Y-%m-%d %H:%M:%S"
+                    datefmt="%Y-%m-%d %H:%M:%S",
                 )
                 self.logger_instance = logger_instance
 
@@ -173,11 +186,13 @@ class RichLogger:
                 record.thread_id = threading.get_ident()
                 record.tag = getattr(record, "tag", None)
 
-                # Get caller context
-                context = self.logger_instance._get_caller_context()
-                record.caller_module = context["module"]
-                record.caller_funcName = context["funcName"]
-                record.caller_lineno = context["lineno"]
+                # Use caller context from extra (already set in _prepare_log_message)
+                # Fallback to _get_caller_context if not present (for direct logger calls)
+                if not hasattr(record, "caller_module"):
+                    context = self.logger_instance._get_caller_context()
+                    record.caller_module = context["module"]
+                    record.caller_funcName = context["funcName"]
+                    record.caller_lineno = context["lineno"]
 
                 formatted = super().format(record)
 
@@ -193,12 +208,54 @@ class RichLogger:
 
     def _get_caller_context(self):
         """Get caller context information."""
-        frame = inspect.currentframe().f_back.f_back.f_back
-        module = inspect.getmodule(frame)
+        # Walk up the stack to find the first frame that's not in this logger module
+        stack = inspect.stack()
+        logger_filename = __file__
+
+        for frame_info in stack:
+            frame = frame_info.frame
+            filename = frame_info.filename
+
+            # Skip frames from this logger module
+            if filename == logger_filename:
+                continue
+
+            # Found a frame outside the logger module
+            module = inspect.getmodule(frame)
+
+            # Extract module name from file path
+            if "olympus_echo_backend" in filename:
+                # Extract relative path from project root
+                parts = filename.split("olympus_echo_backend/")
+                if len(parts) > 1:
+                    module_path = parts[-1]
+                    # Convert path to module name
+                    module_path = module_path.replace("/", ".").replace("\\", ".")
+                    if module_path.endswith(".py"):
+                        module_path = module_path[:-3]
+                    # Remove __init__ if present
+                    if module_path.endswith(".__init__"):
+                        module_path = module_path[:-9]
+                    module_name = module_path
+                else:
+                    module_name = module.__name__ if module else "unknown"
+            else:
+                # Fallback to module name
+                module_name = module.__name__ if module else "unknown"
+
+            return {
+                "funcName": frame_info.function,
+                "lineno": frame_info.lineno,
+                "module": module_name,
+                "filename": filename,  # Store the actual filename for RichHandler
+            }
+
+        # Fallback if we can't find the caller
         return {
-            "funcName": frame.f_code.co_name if frame else "unknown",
-            "lineno": frame.f_lineno if frame else 0,
-            "module": module.__name__ if module else "unknown",
+            "funcName": "unknown",
+            "lineno": 0,
+            "module": "unknown",
+            "filename": "unknown",
         }
 
     def _prepare_log_message(self, level, *args, **kwargs):
@@ -223,7 +280,8 @@ class RichLogger:
             "tag": tag,
             "caller_funcName": context["funcName"],
             "caller_lineno": context["lineno"],
-            "caller_module": context["module"]
+            "caller_module": context["module"],
+            "caller_filename": context["filename"],
         }
         return message, extra
 
@@ -259,7 +317,4 @@ class RichLogger:
 
 
 # Initialize logger
-logger = RichLogger(
-    name="voice_assistant_platform",
-    level=logging.INFO
-)
+logger = RichLogger(name="voice_assistant_platform", level=logging.INFO)

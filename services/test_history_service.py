@@ -208,9 +208,7 @@ class TestCaseResultService(DatabaseService[TestCaseResult]):
                 # For concurrent calls, use pre-uploaded file IDs
                 try:
                     result_data["wav_file_ids"] = wav_file_ids
-                    if len(wav_file_ids) == 1:
-                        # For backward compatibility, also set single recording_file_id
-                        result_data["recording_file_id"] = wav_file_ids[0]
+                    # Note: recording_file_id column removed - using wav_file_ids instead
                     logger.info(f"Using pre-uploaded recording files for concurrent calls: {wav_file_ids}")
                 except Exception as e:
                     logger.warning(f"Could not store wav_file_ids, falling back to legacy: {e}")

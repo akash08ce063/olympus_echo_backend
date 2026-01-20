@@ -11,6 +11,7 @@ from typing import Literal
 
 try:
     import librosa
+
     LIBROSA_AVAILABLE = True
 except ImportError:
     LIBROSA_AVAILABLE = False
@@ -212,4 +213,3 @@ class AudioConverter:
             )
         else:
             return resampled_pcm
-
