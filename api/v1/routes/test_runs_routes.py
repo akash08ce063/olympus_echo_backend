@@ -30,7 +30,7 @@ async def list_test_runs(
     """
     List test runs for a user, grouped by test_run_id with all test case results.
     Uses RPC function for fast single-query data fetching.
-    Transcripts are lazy-loaded and not included in this response.
+    Transcripts are fetched from Pranthora in parallel by result_id (request_id) and included per test case result.
 
     Args:
         user_id: User ID
@@ -39,7 +39,7 @@ async def list_test_runs(
         offset: Number of results to skip
 
     Returns:
-        Grouped test runs with test case results and recordings (no transcripts)
+        Grouped test runs with test case results, recordings, and transcripts (from Pranthora).
     """
     from data_layer.supabase_client import get_supabase_client
 
@@ -120,7 +120,24 @@ async def list_test_runs(
 
                 runs_map[run_id]["test_case_results"].append(test_case_result)
 
-        # Batch generate all signed URLs in parallel
+        # Collect all result_ids for parallel transcript fetch (result_id is request_id in Pranthora)
+        all_result_ids = []
+        for run_data in runs_map.values():
+            for result in run_data["test_case_results"]:
+                if result.get("result_id"):
+                    all_result_ids.append(result["result_id"])
+
+        async def fetch_transcript_safe(pranthora_client: PranthoraApiClient, req_id: str):
+            """Fetch transcript for one result_id; return (result_id, transcript_or_none). Never raise."""
+            try:
+                call_logs = await pranthora_client.get_call_logs(req_id)
+                transcript = call_logs.get("call_transcript") if call_logs else None
+                return (req_id, transcript)
+            except Exception as e:
+                logger.debug(f"Transcript fetch failed for result_id={req_id}: {e}")
+                return (req_id, None)
+
+        # Batch generate signed URLs and fetch transcripts from Pranthora in parallel
         all_url_tasks = []
         url_task_metadata = []  # Track metadata for each URL task in order
 
@@ -129,12 +146,12 @@ async def list_test_runs(
                 if "wav_file_ids" in result:
                     test_case_id = result["test_case_id_for_urls"]
                     wav_file_ids = result["wav_file_ids"]
-                    
+
                     for idx, file_id in enumerate(wav_file_ids):
                         call_num = idx + 1
                         file_name = f"test_case_{test_case_id}_call_{call_num}_recording.wav"
                         file_path = f"{file_id}_{file_name}"
-                        
+
                         # Store metadata for this task
                         url_task_metadata.append({
                             "run_id": run_id,
@@ -142,17 +159,42 @@ async def list_test_runs(
                             "call_num": call_num,
                             "file_id": file_id,
                         })
-                        
+
                         all_url_tasks.append(
                             supabase_client.create_signed_url("recording_files", file_path, 3600)
                         )
 
-        # Execute all URL generation tasks in parallel
-        if all_url_tasks:
+        # Run signed URL generation and Pranthora transcript fetches in parallel
+        signed_urls = []
+        transcript_by_result_id = {}
+        if all_result_ids:
+            async with PranthoraApiClient() as pranthora_client:
+                transcript_tasks = [
+                    fetch_transcript_safe(pranthora_client, rid) for rid in all_result_ids
+                ]
+                if all_url_tasks:
+                    logger.info(
+                        f"Generating {len(all_url_tasks)} signed URLs and {len(all_result_ids)} transcripts in parallel..."
+                    )
+                    url_results, trans_results = await asyncio.gather(
+                        asyncio.gather(*all_url_tasks, return_exceptions=True),
+                        asyncio.gather(*transcript_tasks, return_exceptions=True),
+                    )
+                    signed_urls = list(url_results)
+                else:
+                    logger.info(f"Fetching {len(all_result_ids)} transcripts from Pranthora in parallel...")
+                    trans_results = await asyncio.gather(*transcript_tasks, return_exceptions=True)
+                for outcome in trans_results:
+                    if isinstance(outcome, Exception):
+                        continue
+                    rid, transcript = outcome
+                    transcript_by_result_id[rid] = transcript
+        elif all_url_tasks:
             logger.info(f"Generating {len(all_url_tasks)} signed URLs in parallel...")
             signed_urls = await asyncio.gather(*all_url_tasks, return_exceptions=True)
 
-            # Group URLs by result_id
+        # Map signed URLs back to results (call_recordings)
+        if all_url_tasks and signed_urls:
             result_urls_map = defaultdict(list)
             for idx, signed_url in enumerate(signed_urls):
                 if idx < len(url_task_metadata):
@@ -163,25 +205,23 @@ async def list_test_runs(
                             "recording_url": signed_url,
                             "file_id": metadata["file_id"],
                         })
-
-            # Map URLs back to results
             for run_id, run_data in runs_map.items():
                 for result in run_data["test_case_results"]:
                     if "wav_file_ids" in result:
                         result_id = result["result_id"]
                         call_recordings = result_urls_map.get(result_id, [])
-                        
-                        # Sort by call number
                         call_recordings.sort(key=lambda x: x["call_number"])
-                        
                         result["call_recordings"] = call_recordings
                         result["recording_url"] = (
                             call_recordings[0]["recording_url"] if call_recordings else None
                         )
-                        
-                        # Clean up temporary fields
                         result.pop("wav_file_ids", None)
                         result.pop("test_case_id_for_urls", None)
+
+        # Attach transcript to each test case result (from Pranthora by result_id = request_id)
+        for run_data in runs_map.values():
+            for result in run_data["test_case_results"]:
+                result["transcript"] = transcript_by_result_id.get(result["result_id"])
 
         # Convert runs_map to list
         grouped_runs = list(runs_map.values())

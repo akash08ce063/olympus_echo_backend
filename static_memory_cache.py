@@ -92,6 +92,26 @@ class StaticMemoryCache:
         """Check if cache has been initialized."""
         return cls._initialized
 
+    @classmethod
+    def get_livekit_url(cls) -> str:
+        """Get LiveKit URL from config."""
+        return cls.get_config("livekit", "url")
+
+    @classmethod
+    def get_livekit_api_key(cls) -> str:
+        """Get LiveKit API key from config."""
+        return cls.get_config("livekit", "api_key")
+
+    @classmethod
+    def get_livekit_api_secret(cls) -> str:
+        """Get LiveKit API secret from config."""
+        return cls.get_config("livekit", "api_secret")
+
+    @classmethod
+    def get_livekit_config(cls) -> Dict[str, str]:
+        """Get complete LiveKit configuration."""
+        return cls.get_section("livekit")
+
 
 # Initialize on import
 StaticMemoryCache.initialize()
