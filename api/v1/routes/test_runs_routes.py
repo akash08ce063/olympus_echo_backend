@@ -93,11 +93,14 @@ async def list_test_runs(
                     "concurrent_calls": row["concurrent_calls"] or 1,
                     "call_recordings": [],
                     "recording_url": row["recording_file_url"],
-                    "status": row["result_status"],
-                    "error_message": row["error_message"],
-                    "evaluation_result": row["evaluation_result"],
-                    "started_at": row["result_started_at"],
-                    "completed_at": row["result_completed_at"],
+                    "status": row.get("result_status"),
+                    # keep external/evaluated fields as internal-only keys so we can
+                    # surface them per-call without leaking them at the base object
+                    "_error_message": row.get("error_message"),
+                    "_evaluation_result": row.get("evaluation_result"),
+                    "_started_at": row.get("result_started_at"),
+                    "_completed_at": row.get("result_completed_at"),
+                    "_transcript": None,
                 }
 
                 # Extract wav_file_ids from conversation_logs for signed URL generation
@@ -218,10 +221,85 @@ async def list_test_runs(
                         result.pop("wav_file_ids", None)
                         result.pop("test_case_id_for_urls", None)
 
-        # Attach transcript to each test case result (from Pranthora by result_id = request_id)
+        # Store fetched transcripts into an internal field so we can expose them
+        # per-call below without adding outside-dependent fields to top-level
+        # objects.
         for run_data in runs_map.values():
             for result in run_data["test_case_results"]:
-                result["transcript"] = transcript_by_result_id.get(result["result_id"])
+                result["_transcript"] = transcript_by_result_id.get(result["result_id"])
+
+        # Reshape test_case_results to expose per-call details under a `calls` collection,
+        # while keeping one logical test_case_result per test_case_id.
+        for run_id, run_data in runs_map.items():
+            original_results = run_data.get("test_case_results", [])
+            if not original_results:
+                continue
+
+            grouped_by_test_case = {}
+            ordered_keys = []
+
+            for result in original_results:
+                test_case_id = result.get("test_case_id")
+                # Use test_case_id as the logical key; fall back to result_id to avoid collisions
+                key = test_case_id or f"__no_test_case__:{result.get('result_id')}"
+
+                if key not in grouped_by_test_case:
+                    # Base container for this logical test case
+                    base = dict(result)
+                    # Transcript will be provided per call instead of on the base object
+                    base["transcript"] = None
+
+                    grouped_by_test_case[key] = {
+                        "base": base,
+                        "results": [result],
+                    }
+                    ordered_keys.append(key)
+                else:
+                    grouped_by_test_case[key]["results"].append(result)
+
+            new_results = []
+            for key in ordered_keys:
+                entry = grouped_by_test_case[key]
+                base = entry["base"]
+                per_result = entry["results"]
+
+                # Use the call_recordings from the base for mapping single recording_url per call
+                call_recordings = base.get("call_recordings") or []
+
+                calls = []
+                for idx, r in enumerate(per_result, start=1):
+                    call_data = {
+                        "call_number": idx,
+                        "result_id": r.get("result_id"),
+                        "status": r.get("status"),
+                        # expose the previously-external fields per call
+                        "error_message": r.get("_error_message"),
+                        "evaluation_result": r.get("_evaluation_result"),
+                        "started_at": r.get("_started_at"),
+                        "completed_at": r.get("_completed_at"),
+                        "transcript": r.get("_transcript"),
+                    }
+
+                    # Best-effort mapping of a single recording URL to this call
+                    if call_recordings and 0 <= idx - 1 < len(call_recordings):
+                        call_data["recording_url"] = call_recordings[idx - 1].get("recording_url")
+                    else:
+                        call_data["recording_url"] = base.get("recording_url")
+
+                    calls.append(call_data)
+
+                # Ensure concurrent_calls reflects the actual number of calls for this test case
+                base["concurrent_calls"] = len(calls)
+                base["calls"] = calls
+
+                # remove internal-only fields from base before returning
+                for bk in list(base.keys()):
+                    if bk.startswith("_") or bk == "call_recordings":
+                        base.pop(bk, None)
+
+                new_results.append(base)
+
+            run_data["test_case_results"] = new_results
 
         # Convert runs_map to list
         grouped_runs = list(runs_map.values())
