@@ -5,7 +5,7 @@
 	},
 	"pranthora": {
 		"api_key": "749dab2bc3af97292681e23e9e87a313",
-		"base_url": "http://localhost:5050"
+		"base_url": "https://api.pranthora.com"
 	},
 	"livekit": {
 		"url": "wss://jill-80u1rdyp.livekit.cloud",
