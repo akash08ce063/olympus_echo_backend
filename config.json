@@ -1,11 +1,11 @@
 {
 	"database": {
-		"supabase_url": "https://hwlhkoseuixsnbsxhvtv.supabase.co",
-		"supabase_key": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh3bGhrb3NldWl4c25ic3hodnR2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjcxNjk4NjMsImV4cCI6MjA4Mjc0NTg2M30.NR29CiYW7XhUdEJGkGr_AQA7s7IcjaYzlMkqUeBn3Cg"
+		"supabase_url": "https://kwmfuhsqcussyphmhlgz.supabase.co",
+		"supabase_key": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt3bWZ1aHNxY3Vzc3lwaG1obGd6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk1NjIzNDgsImV4cCI6MjA4NTEzODM0OH0.JUDX2qQG8qLC8rZJ7vGJ86WDpd97hvJXJ3wEB4d5ugo"
 	},
 	"pranthora": {
 		"api_key": "749dab2bc3af97292681e23e9e87a313",
-		"base_url": "https://api.pranthora.com"
+		"base_url": "http://localhost:5050"
 	},
 	"livekit": {
 		"url": "wss://jill-80u1rdyp.livekit.cloud",
