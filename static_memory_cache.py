@@ -18,7 +18,7 @@ class StaticMemoryCache:
     _initialized: bool = False
 
     @classmethod
-    def initialize(cls, config_file: str = "config.json"):
+    def initialize(cls, config_file: str = "configurations.json"):
         """Load config into memory at startup."""
         if cls._initialized:
             return

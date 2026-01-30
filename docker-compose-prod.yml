@@ -1,0 +1,18 @@
+services:
+    olympus_platform:
+      image: code4anuj/olympus_echo_backend:latest
+      container_name: platform
+      ports:
+        - "5050:5050"
+      extra_hosts:
+        - "host.docker.internal:host-gateway"
+
+
+      environment:
+        LOKI_ENABLED: "true"
+        GRAFANA_LOKI_URL: "https://logs-prod-036.grafana.net/loki/api/v1/push"
+        GRAFANA_LOKI_USER_ID: "1220258"
+        GRAFANA_LOKI_PASSWORD: "glc_eyJvIjoiMTQzNDIxOSIsIm4iOiJzdGFjay0xMjYyNDY0LWhsLXdyaXRlLWxvY2FsX21hY2hpbmUiLCJrIjoiRUtxMTBLUmM1OUQwVVNoOVZnMTQ1SU8xIiwibSI6eyJyIjoicHJvZC11cy1lYXN0LTAifX0="
+      volumes:
+        - ./config.json:/usr/src/app/config.json
+
