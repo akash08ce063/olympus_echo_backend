@@ -45,3 +45,9 @@ __pycache__
 .vscode
 logs/*
 .cursor
+
+
+.env
+*.env
+docker-compose*.yml
+secrets/
