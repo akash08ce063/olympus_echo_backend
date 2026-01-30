@@ -12,7 +12,7 @@ services:
         LOKI_ENABLED: "true"
         GRAFANA_LOKI_URL: "https://logs-prod-036.grafana.net/loki/api/v1/push"
         GRAFANA_LOKI_USER_ID: "1220258"
-        GRAFANA_LOKI_PASSWORD: "glc_eyJvIjoiMTQzNDIxOSIsIm4iOiJzdGFjay0xMjYyNDY0LWhsLXdyaXRlLWxvY2FsX21hY2hpbmUiLCJrIjoiRUtxMTBLUmM1OUQwVVNoOVZnMTQ1SU8xIiwibSI6eyJyIjoicHJvZC11cy1lYXN0LTAifX0="
+        GRAFANA_LOKI_PASSWORD: ${GRAFANA_API_KEY}
       volumes:
         - ./config.json:/usr/src/app/config.json
 

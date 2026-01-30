@@ -10,6 +10,7 @@ from api.v1.routes import (
     user_agents_routes, test_cases_routes, test_history_routes,
     test_execution_routes, test_runs_routes
 )
+from api.v1.supabase_middleware import SupabaseAuthMiddleware
 from telemetrics.logger import logger
 
 
@@ -27,6 +28,9 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# Validate Bearer auth token coming from frontend using Supabase
+app.add_middleware(SupabaseAuthMiddleware)
 
 # Create v1 API router
 v1_router = APIRouter(prefix="/v1")
