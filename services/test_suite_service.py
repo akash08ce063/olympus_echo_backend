@@ -74,9 +74,12 @@ class TestSuiteService(DatabaseService[TestSuite]):
                         id=ta_data['id'],
                         user_id=ta_data['user_id'],
                         name=ta_data['name'],
-                        websocket_url=ta_data['websocket_url'],
-                        sample_rate=ta_data['sample_rate'],
-                        encoding=ta_data['encoding'],
+                        agent_type=ta_data.get('agent_type') or 'custom',
+                        websocket_url=ta_data.get('websocket_url') or '',
+                        sample_rate=ta_data.get('sample_rate', 16000),
+                        encoding=ta_data.get('encoding') or 'pcm_s16le',
+                        connection_metadata=ta_data.get('connection_metadata'),
+                        provider_config=ta_data.get('provider_config'),
                         created_at=ta_data['created_at'],
                         updated_at=ta_data['updated_at']
                     )

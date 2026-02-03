@@ -20,6 +20,7 @@ from services.database_service import DatabaseService
 from services.test_case_service import TestCaseService
 from services.test_suite_service import TestSuiteService
 from services.agent_connection_manager import AgentConnectionManager
+from services.target_connection_factory import create_target_connection
 from services.target_agent_service import TargetAgentService
 from services.user_agent_service import UserAgentService
 from services.test_history_service import TestRunHistoryService, TestCaseResultService
@@ -666,12 +667,17 @@ class TestExecutionService:
                 f"Starting conversation simulation for test case {test_case.id} with {concurrent_calls} concurrent call(s)"
             )
             logger.info(
-                f"Target agent: {target_agent.websocket_url}, User agent: {user_agent.pranthora_agent_id}"
+                f"Target agent type: {getattr(target_agent, 'agent_type', 'custom')}, User agent: {user_agent.pranthora_agent_id}"
             )
 
             # Validate agents have required information
-            if not target_agent.websocket_url:
-                raise ValueError("Target agent missing websocket_url")
+            agent_type = (getattr(target_agent, "agent_type", None) or "custom").lower()
+            if agent_type == "custom" and not (getattr(target_agent, "websocket_url", None) or "").strip():
+                raise ValueError("Target agent (custom) missing websocket_url or HTTP endpoint URL")
+            if agent_type == "vapi":
+                pc = getattr(target_agent, "provider_config", None) or {}
+                if not (pc.get("assistant_id") or pc.get("assistantId")) or not (pc.get("api_key") or pc.get("api_key_env")):
+                    raise ValueError("Target agent (vapi) missing provider_config.assistant_id or api_key")
 
             if not user_agent.pranthora_agent_id:
                 raise ValueError("User agent missing pranthora_agent_id")
@@ -891,20 +897,6 @@ class TestExecutionService:
             else:
                 base_ws_url = pranthora_base_url.replace("http://", "ws://")
 
-            # For target agent, we still need a websocket URL. If target_agent has a websocket_url, use it,
-            # otherwise construct one. But for now, let's use the configured URL and replace the port
-            target_ws_url = target_agent.websocket_url
-            if not target_ws_url.startswith(("ws://", "wss://")):
-                raise ValueError(f"Invalid target agent websocket URL: {target_ws_url}")
-
-            # Replace the port in target_ws_url with the port from pranthora_base_url
-            import re
-
-            port_match = re.search(r":(\d+)", pranthora_base_url)
-            if port_match:
-                pranthora_port = port_match.group(1)
-                target_ws_url = re.sub(r":\d+", f":{pranthora_port}", target_ws_url)
-
             user_ws_url = (
                 f"{base_ws_url}/api/call/media-stream/agents/{user_agent.pranthora_agent_id}"
             )
@@ -912,11 +904,6 @@ class TestExecutionService:
             # Generate unique call SIDs for this conversation
             call_sid_target = str(uuid.uuid4())
             call_sid_user = request_id  # Use request_id as call_sid for User Agent to ensure transcript matching
-
-            # Add call_sid to URLs
-            if "call_sid=" not in target_ws_url:
-                separator = "&" if "?" in target_ws_url else "?"
-                target_ws_url = f"{target_ws_url}{separator}call_sid={call_sid_target}"
             user_ws_url = f"{user_ws_url}?call_sid={call_sid_user}"
 
             # Queues for this conversation
@@ -975,19 +962,18 @@ class TestExecutionService:
             target_ready = asyncio.Event()
             user_ready = asyncio.Event()
 
-            # Start websocket connections for this conversation
-            # Target Agent Connection
-            target_manager = AgentConnectionManager(
-                name="Target",
-                ws_url=target_ws_url,
+            # Target Agent Connection (custom WebSocket/HTTP or Vapi via factory)
+            target_manager = await create_target_connection(
+                target_agent,
                 call_sid=call_sid_target,
-                incoming_queue=user_to_target_queue,  # Audio IN to this agent (read from other agent's output)
-                outgoing_queue=target_to_user_queue,  # Audio OUT from this agent (read from ws, put here)
+                incoming_queue=user_to_target_queue,
+                outgoing_queue=target_to_user_queue,
                 stop_event=stop_event,
                 my_ready=target_ready,
                 other_ready=user_ready,
-                sync_timeout=self.connection_sync_timeout,
                 record_sent_callback=lambda audio: record_audio_bridge(audio, "user_to_target"),
+                sync_timeout=self.connection_sync_timeout,
+                pranthora_base_url=pranthora_base_url,
             )
             target_task = asyncio.create_task(target_manager.connect())
 
