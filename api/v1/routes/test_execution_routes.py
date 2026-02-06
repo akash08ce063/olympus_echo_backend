@@ -144,6 +144,10 @@ async def run_test_suite(
 
     except HTTPException:
         raise
+    except ValueError as e:
+        # Validation / configuration errors should be surfaced as 400 to frontend
+        logger.error(f"Validation error starting test suite execution: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Error starting test suite execution: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to start test execution: {str(e)}")
@@ -244,6 +248,9 @@ async def run_test_case(
 
     except HTTPException:
         raise
+    except ValueError as e:
+        logger.error(f"Validation error starting test case execution: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Error starting test case execution: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to start test execution: {str(e)}")

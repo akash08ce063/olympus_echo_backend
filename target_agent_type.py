@@ -11,3 +11,4 @@ class TargetAgentType(str, Enum):
     CUSTOM = "custom"   # WebSocket or HTTP URL (current behavior)
     VAPI = "vapi"       # Vapi assistant by ID (Vapi SDK/API)
     RETELL = "retell"   # Reserved for future Retell integration
+    PHONE = "phone"     # Direct phone target using connection_metadata.phone_number

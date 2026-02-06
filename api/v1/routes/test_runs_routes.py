@@ -441,60 +441,9 @@ async def get_recording_url(
             )
 
         test_case_id = result.get("test_case_id")
-        conversation_logs = result.get("conversation_logs", []) or []
-        wav_file_ids = []
-        if isinstance(conversation_logs, list):
-            for log_entry in conversation_logs:
-                if (
-                    isinstance(log_entry, dict)
-                    and log_entry.get("type") == "recording_metadata"
-                    and "wav_file_ids" in log_entry
-                ):
-                    wav_file_ids = log_entry.get("wav_file_ids", [])
-                    break
-        concurrent_calls = result.get("concurrent_calls", 1) or 1
-        supabase_client = await get_supabase_client()
-
-        if wav_file_ids and len(wav_file_ids) > 0:
-            recording_urls = []
-
-            for idx, file_id in enumerate(wav_file_ids):
-                call_num = idx + 1
-                if call_number is not None and call_num != call_number:
-                    continue
-
-                file_name = f"test_case_{test_case_id}_call_{call_num}_recording.wav"
-                file_path = f"{file_id}_{file_name}"
-
-                try:
-                    signed_url = await supabase_client.create_signed_url(
-                        "recording_files", file_path, 3600
-                    )
-                    if signed_url:
-                        recording_urls.append(
-                            {
-                                "call_number": call_num,
-                                "recording_url": signed_url,
-                                "file_id": file_id,
-                            }
-                        )
-                except Exception as e:
-                    logger.warning(f"Failed to generate URL for call {call_num}: {e}")
-
-            if not recording_urls:
-                raise HTTPException(
-                    status_code=404, detail="No recording files found for this test result"
-                )
-
-            return {
-                "result_id": str(result_id),
-                "test_case_id": str(test_case_id),
-                "concurrent_calls": concurrent_calls,
-                "recordings": recording_urls,
-                "expires_in": 3600,
-            }
 
         recording_file_url = result.get("recording_file_url")
+        # We no longer generate new Supabase URLs here; Pranthora is the source of truth.
         if not recording_file_url:
             raise HTTPException(
                 status_code=404, detail="No recording file found for this test result"
@@ -561,41 +510,8 @@ async def get_recordings_by_suite(
                         break
             concurrent_calls = r.get("concurrent_calls", 1) or 1
 
-            if wav_file_ids and len(wav_file_ids) > 0:
-                call_recordings = []
-                for idx, file_id in enumerate(wav_file_ids):
-                    call_num = idx + 1
-                    file_name = f"test_case_{test_case_id}_call_{call_num}_recording.wav"
-                    file_path = f"{file_id}_{file_name}"
-
-                    try:
-                        signed_url = await supabase_client.create_signed_url(
-                            "recording_files", file_path, 3600
-                        )
-                        if signed_url:
-                            call_recordings.append(
-                                {
-                                    "call_number": call_num,
-                                    "recording_url": signed_url,
-                                    "file_id": file_id,
-                                }
-                            )
-                    except Exception as e:
-                        logger.warning(f"Failed to generate URL for call {call_num}: {e}")
-
-                if call_recordings:
-                    recordings.append(
-                        {
-                            "result_id": r["id"],
-                            "test_case_id": test_case_id,
-                            "concurrent_calls": concurrent_calls,
-                            "call_recordings": call_recordings,
-                            "recording_url": call_recordings[0]["recording_url"],
-                            "status": r["status"],
-                            "run_id": r.get("test_run_id"),
-                        }
-                    )
-            elif r.get("recording_file_url"):
+            # Prefer Pranthora-provided recording_file_url (from call_session.metadata.recording_url)
+            if r.get("recording_file_url"):
                 recordings.append(
                     {
                         "result_id": r["id"],

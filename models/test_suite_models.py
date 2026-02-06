@@ -60,7 +60,7 @@ class TargetAgentBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=255, description="Target agent name")
     agent_type: str = Field(
         "custom",
-        description="Target agent type: custom (ws/http), vapi, retell. Stored as string.",
+        description="Target agent type: custom (ws/http), vapi, retell, phone. Stored as string.",
     )
     websocket_url: Optional[str] = Field(
         "",
@@ -71,7 +71,7 @@ class TargetAgentBase(BaseModel):
     encoding: str = Field("pcm_s16le", description="Audio encoding (e.g., pcm_s16le, opus, pcm_mulaw)")
     connection_metadata: Optional[Dict[str, Any]] = Field(
         None,
-        description="For HTTP(S) custom URLs: method, headers, payload, response_websocket_url_path.",
+        description="For custom URLs: HTTP metadata. For phone type: store target phone number as {'phone_number': '<E.164>'}.",
     )
     provider_config: Optional[Dict[str, Any]] = Field(
         None,
@@ -124,6 +124,10 @@ class UserAgentBase(BaseModel):
     system_prompt: str = Field(..., description="System prompt for the agent")
     temperature: float = Field(0.7, ge=0.0, le=2.0, description="Temperature setting for the AI model")
     pranthora_agent_id: Optional[str] = Field(None, description="Corresponding agent ID in Pranthora backend")
+    phone_numbers: Optional[Dict[str, Any]] = Field(
+        None,
+        description="JSON config for phone tests: {'phone_numbers': ['+1555...', ...]}",
+    )
 
 
 class UserAgentCreate(UserAgentBase):
@@ -137,6 +141,10 @@ class UserAgentUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=255, description="User agent name")
     system_prompt: Optional[str] = Field(None, description="System prompt for the agent")
     temperature: Optional[float] = Field(None, ge=0.0, le=2.0, description="Temperature setting for the AI model")
+    phone_numbers: Optional[Dict[str, Any]] = Field(
+        None,
+        description="JSON config for phone tests: {'phone_numbers': ['+1555...', ...]}",
+    )
 
 
 class UserAgent(UserAgentBase):

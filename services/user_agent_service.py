@@ -33,8 +33,12 @@ class UserAgentService(DatabaseService[UserAgent]):
             "name": data.name,
             "system_prompt": data.system_prompt,
             "temperature": data.temperature,
-            "pranthora_agent_id": None  # Will be set if Pranthora succeeds
+            "pranthora_agent_id": None,  # Will be set if Pranthora succeeds
         }
+
+        # Optional phone_numbers JSONB config for phone tests
+        if getattr(data, "phone_numbers", None):
+            agent_data["phone_numbers"] = data.phone_numbers
 
         # First create agent in Pranthora
         async with PranthoraApiClient() as client:
@@ -50,6 +54,21 @@ class UserAgentService(DatabaseService[UserAgent]):
                 # Store Pranthora agent ID in our database
                 agent_data["pranthora_agent_id"] = pranthora_response["agent"]["id"]
                 logger.info(f"Created agent in Pranthora: {agent_data['pranthora_agent_id']}")
+
+                # If phone_numbers provided, map them to this Pranthora agent
+                phone_cfg = getattr(data, "phone_numbers", None) or {}
+                phone_list = phone_cfg.get("phone_numbers") if isinstance(phone_cfg, dict) else None
+                if phone_list and isinstance(phone_list, list):
+                    try:
+                        await client.map_agent_to_phone_number(
+                            agent_id=agent_data["pranthora_agent_id"],
+                            phone_numbers=[p for p in phone_list if isinstance(p, str) and p.strip()],
+                        )
+                        logger.info(
+                            f"Mapped {len(phone_list)} phone numbers to Pranthora agent {agent_data['pranthora_agent_id']}"
+                        )
+                    except Exception as map_err:
+                        logger.error(f"Failed to map phone numbers to Pranthora agent: {map_err}")
 
             except Exception as e:
                 logger.error(f"Failed to create agent in Pranthora: {e}")
@@ -105,7 +124,23 @@ class UserAgentService(DatabaseService[UserAgent]):
                         agent_result["pranthora_agent_id"],
                         pranthora_update_data
                     )
-                logger.info(f"Updated agent in Pranthora: {agent_result['pranthora_agent_id']}")
+                    logger.info(f"Updated agent in Pranthora: {agent_result['pranthora_agent_id']}")
+
+                    # If phone_numbers were updated and we have a Pranthora agent, map them as well
+                    phone_cfg = update_data.get("phone_numbers") or agent_result.get("phone_numbers") or {}
+                    if isinstance(phone_cfg, dict):
+                        phone_list = phone_cfg.get("phone_numbers") or []
+                        if phone_list:
+                            try:
+                                await client.map_agent_to_phone_number(
+                                    agent_id=agent_result["pranthora_agent_id"],
+                                    phone_numbers=[p for p in phone_list if isinstance(p, str) and p.strip()],
+                                )
+                                logger.info(
+                                    f"Mapped {len(phone_list)} phone numbers to Pranthora agent {agent_result['pranthora_agent_id']} on update"
+                                )
+                            except Exception as map_err:
+                                logger.error(f"Failed to map phone numbers to Pranthora agent on update: {map_err}")
         except Exception as e:
             logger.error(f"Failed to update agent in Pranthora: {e}")
             # Don't fail the local update if Pranthora update fails

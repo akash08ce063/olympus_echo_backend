@@ -102,6 +102,13 @@ class TestSuiteService(DatabaseService[TestSuite]):
                     if isinstance(model_config, str):
                         model_config = json.loads(model_config)
 
+                    phone_numbers = ua_data.get('phone_numbers')
+                    if isinstance(phone_numbers, str):
+                        try:
+                            phone_numbers = json.loads(phone_numbers)
+                        except Exception:
+                            phone_numbers = None
+
                     user_agent = UserAgent(
                         id=ua_data['id'],
                         user_id=ua_data['user_id'],
@@ -110,6 +117,7 @@ class TestSuiteService(DatabaseService[TestSuite]):
                         evaluation_criteria=evaluation_criteria,
                         agent_model_config=model_config,
                         pranthora_agent_id=ua_data.get('pranthora_agent_id'),
+                        phone_numbers=phone_numbers,
                         created_at=ua_data['created_at'],
                         updated_at=ua_data['updated_at']
                     )
