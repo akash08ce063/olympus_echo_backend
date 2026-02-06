@@ -20,6 +20,7 @@ from services.database_service import DatabaseService
 from services.test_case_service import TestCaseService
 from services.test_suite_service import TestSuiteService
 from services.agent_connection_manager import AgentConnectionManager
+from services.target_connection_factory import create_target_connection
 from services.target_agent_service import TargetAgentService
 from services.user_agent_service import UserAgentService
 from services.test_history_service import TestRunHistoryService, TestCaseResultService
@@ -459,18 +460,30 @@ class TestExecutionService:
             if not created_result_ids:
                 raise ValueError("Failed to create any test case result entries")
 
-            # Use first request_id as primary for backward compatibility
+            # Use first request_id as primary for backward compatibility (for websocket path)
             primary_request_id = call_request_ids[0]
 
-            # Simulate conversation using goals/prompts, passing all request_ids
-            conversation_result = await self._simulate_conversation(
-                test_case,
-                target_agent,
-                user_agent,
-                calls_to_use,
-                primary_request_id,
-                call_request_ids,
-            )
+            # Decide execution path based on target agent type
+            agent_type = (getattr(target_agent, "agent_type", None) or "custom").lower()
+
+            if agent_type == "phone":
+                # Phone tests: delegate to Pranthora call APIs instead of WebSocket bridge
+                conversation_result = await self._simulate_phone_conversation(
+                    test_case,
+                    target_agent,
+                    user_agent,
+                    calls_to_use,
+                )
+            else:
+                # Websocket / VAPI path (existing behavior)
+                conversation_result = await self._simulate_conversation(
+                    test_case,
+                    target_agent,
+                    user_agent,
+                    calls_to_use,
+                    primary_request_id,
+                    call_request_ids,
+                )
 
             # Determine status based on conversation result
             if conversation_result.get("success", False):
@@ -493,7 +506,7 @@ class TestExecutionService:
                     f"Conversation failed for test case {test_case.id}: {conversation_result.get('error_message', 'Unknown error')}"
                 )
 
-            # Get wav_file_ids and request_ids from conversation result
+            # Get wav_file_ids and request_ids from conversation result (wav_file_ids unused; recordings handled by Pranthora)
             wav_file_ids = conversation_result.get("wav_file_ids", [])
             concurrent_calls_count = conversation_result.get("concurrent_calls", 1)
 
@@ -507,20 +520,6 @@ class TestExecutionService:
                 # Get the corresponding wav_file_id and conversation logs for this call
                 call_wav_file_id = wav_file_ids[idx] if idx < len(wav_file_ids) else None
                 call_recording_url = None
-
-                # Generate signed URL for this call's recording if available
-                if call_wav_file_id:
-                    try:
-                        from data_layer.supabase_client import get_supabase_client
-
-                        supabase_client = await get_supabase_client()
-                        file_name = f"test_case_{test_case.id}_call_{call_num}_recording.wav"
-                        file_path = f"{call_wav_file_id}_{file_name}"
-                        call_recording_url = await supabase_client.create_signed_url(
-                            "recording_files", file_path, 3600
-                        )
-                    except Exception as e:
-                        logger.warning(f"Failed to generate signed URL for call {call_num}: {e}")
 
                 # Update this specific test_case_result entry
                 # Only store recording_metadata in conversation_logs, not verbose audio logs
@@ -542,12 +541,7 @@ class TestExecutionService:
                     "concurrent_calls": concurrent_calls_count,
                 }
 
-                # Add recording URL for this call
-                if call_recording_url:
-                    update_data["recording_file_url"] = call_recording_url
-                elif idx == 0 and conversation_result.get("recording_file_url"):
-                    # Use first recording URL for backward compatibility on first entry
-                    update_data["recording_file_url"] = conversation_result["recording_file_url"]
+                # No local recording URL; Pranthora provides recording_url via call_session metadata
 
                 try:
                     success = await self.test_result_service.update(result_id, update_data)
@@ -666,12 +660,17 @@ class TestExecutionService:
                 f"Starting conversation simulation for test case {test_case.id} with {concurrent_calls} concurrent call(s)"
             )
             logger.info(
-                f"Target agent: {target_agent.websocket_url}, User agent: {user_agent.pranthora_agent_id}"
+                f"Target agent type: {getattr(target_agent, 'agent_type', 'custom')}, User agent: {user_agent.pranthora_agent_id}"
             )
 
             # Validate agents have required information
-            if not target_agent.websocket_url:
-                raise ValueError("Target agent missing websocket_url")
+            agent_type = (getattr(target_agent, "agent_type", None) or "custom").lower()
+            if agent_type == "custom" and not (getattr(target_agent, "websocket_url", None) or "").strip():
+                raise ValueError("Target agent (custom) missing websocket_url or HTTP endpoint URL")
+            if agent_type == "vapi":
+                pc = getattr(target_agent, "provider_config", None) or {}
+                if not (pc.get("assistant_id") or pc.get("assistantId")) or not (pc.get("api_key") or pc.get("api_key_env")):
+                    raise ValueError("Target agent (vapi) missing provider_config.assistant_id or api_key")
 
             if not user_agent.pranthora_agent_id:
                 raise ValueError("User agent missing pranthora_agent_id")
@@ -720,13 +719,13 @@ class TestExecutionService:
             # Wait for all conversations to complete
             conversation_results = await asyncio.gather(*conversation_tasks, return_exceptions=True)
 
-            # Process results and create individual WAV files for each call
+            # Process results (no local WAV generation – recordings are handled in Pranthora)
             all_conversation_logs = []
             all_audio_data = bytearray()
             total_duration = 0
             successful_calls = 0
             failed_calls = 0
-            wav_file_ids = []
+            wav_file_ids: list[str] = []
             request_ids = call_request_ids.copy()  # Start with the request_ids we used for calls
 
             for i, result in enumerate(conversation_results):
@@ -751,45 +750,6 @@ class TestExecutionService:
                         logger.warning(
                             f"Call {call_number} request_id mismatch: expected {call_request_ids[i]}, got {req_id}"
                         )
-
-                    # Create individual WAV file for this call
-                    pcm_frames = result.get("pcm_frames", b"")
-                    logger.info(f"[Call {call_number}] PCM frames: {len(pcm_frames)} bytes")
-                    if pcm_frames:
-                        try:
-                            # Create WAV file data in memory
-                            wav_buffer = io.BytesIO()
-                            with wave.open(wav_buffer, "wb") as wf:
-                                wf.setnchannels(1)  # Mono
-                                wf.setsampwidth(2)  # 16-bit PCM
-                                wf.setframerate(self.sample_rate)
-                                wf.writeframes(pcm_frames)
-
-                            wav_data = wav_buffer.getvalue()
-                            # Fixed format: test_case_{test_case.id}_call_{index}_recording.wav
-                            wav_filename = (
-                                f"test_case_{test_case.id}_call_{call_number}_recording.wav"
-                            )
-
-                            # Upload individual WAV file to Supabase
-                            wav_file_id = await self.recording_service.upload_recording_file(
-                                file_content=wav_data,
-                                file_name=wav_filename,
-                                content_type="audio/wav",
-                            )
-
-                            if wav_file_id:
-                                wav_file_ids.append(str(wav_file_id))
-                                logger.info(
-                                    f"📤 Uploaded WAV file for call {call_number}: {wav_file_id}_{wav_filename}"
-                                )
-                            else:
-                                logger.error(f"Failed to upload WAV file for call {call_number}")
-
-                        except Exception as e:
-                            logger.error(
-                                f"Failed to create/upload WAV file for call {call_number}: {e}"
-                            )
                 else:
                     failed_calls += 1
                     logger.error(
@@ -798,29 +758,10 @@ class TestExecutionService:
 
             duration_seconds = time.time() - start_time
 
-            # Generate signed URL for first file (backward compatibility)
-            recording_file_url = None
-            if wav_file_ids:
-                try:
-                    from data_layer.supabase_client import get_supabase_client
-
-                    supabase_client = await get_supabase_client()
-                    first_file_id = wav_file_ids[0]
-                    first_filename = f"test_case_{test_case.id}_call_1_recording.wav"
-                    file_path = f"{first_file_id}_{first_filename}"
-                    recording_file_url = await supabase_client.create_signed_url(
-                        "recording_files", file_path, 3600
-                    )
-                    if recording_file_url:
-                        logger.info(f"📤 Generated signed URL for first recording: {file_path}")
-                except Exception as e:
-                    logger.error(f"Failed to generate signed URL: {e}")
-
             logger.info(
                 f"All conversations completed: {successful_calls}/{concurrent_calls} successful, "
                 f"{failed_calls} failed, {len(all_conversation_logs)} total turns, "
-                f"{len(all_audio_data)} bytes combined audio, {duration_seconds:.2f}s total duration, "
-                f"{len(wav_file_ids)} WAV files created: {wav_file_ids}"
+                f"{len(all_audio_data)} bytes combined audio, {duration_seconds:.2f}s total duration"
             )
 
             return {
@@ -832,8 +773,8 @@ class TestExecutionService:
                 "concurrent_calls": concurrent_calls,
                 "successful_calls": successful_calls,
                 "failed_calls": failed_calls,
-                "recording_file_url": recording_file_url,  # Signed URL for first recording (backward compatibility)
-                "wav_file_ids": wav_file_ids,  # List of file IDs for all concurrent calls
+                "recording_file_url": None,  # Recording is handled in Pranthora, not Olympus
+                "wav_file_ids": [],  # No local WAV files
                 "request_ids": request_ids,  # List of request_ids for fetching transcripts from Pranthora
                 "success": successful_calls > 0,
                 "error_message": (
@@ -845,6 +786,180 @@ class TestExecutionService:
 
         except Exception as e:
             logger.error(f"Error simulating conversations: {e}", exc_info=True)
+            return {
+                "conversation_logs": [],
+                "audio_data": b"",
+                "combined_audio_bytes": 0,
+                "error_message": str(e),
+                "success": False,
+            }
+
+    async def _simulate_phone_conversation(
+        self,
+        test_case: TestCase,
+        target_agent,
+        user_agent,
+        concurrent_calls: int,
+    ) -> Dict[str, Any]:
+        """
+        Phone test execution path.
+
+        Instead of bridging WebSockets, this uses Pranthora's /calls and /calls/end APIs
+        to run real phone calls between the Pranthora agent (user agent) and the
+        target phone number stored on the target agent.
+        """
+        from static_memory_cache import StaticMemoryCache
+
+        try:
+            logger.info(
+                f"[PhoneTest] Starting phone test for case {test_case.id} with {concurrent_calls} concurrent call(s)"
+            )
+
+            # Validate user agent has a Pranthora agent id
+            if not user_agent.pranthora_agent_id:
+                raise ValueError("User agent missing pranthora_agent_id for phone tests")
+
+            # Validate user agent phone_numbers config
+            phone_cfg = getattr(user_agent, "phone_numbers", None) or {}
+            phone_list = []
+            if isinstance(phone_cfg, dict):
+                raw_list = phone_cfg.get("phone_numbers") or []
+                if isinstance(raw_list, list):
+                    phone_list = [p for p in raw_list if isinstance(p, str) and p.strip()]
+
+            if not phone_list:
+                raise ValueError(
+                    "Selected user agent has no phone_numbers configured; cannot run phone-type tests"
+                )
+
+            if concurrent_calls > len(phone_list):
+                raise ValueError(
+                    f"Concurrent calls ({concurrent_calls}) exceed available phone numbers "
+                    f"({len(phone_list)}) for selected user agent"
+                )
+
+            # Validate target agent has phone_number in connection_metadata
+            connection_metadata = getattr(target_agent, "connection_metadata", None) or {}
+            target_phone = connection_metadata.get("phone_number")
+            if not target_phone:
+                raise ValueError(
+                    "Target agent of type 'phone' must have connection_metadata.phone_number set"
+                )
+
+            # Ensure mappings between agent and phone_numbers in Pranthora
+            try:
+                mapping_check = await self.pranthora_client.check_agent_phone_numbers_mapings(
+                    agent_id=user_agent.pranthora_agent_id,
+                    phone_numbers=phone_list,
+                )
+                results = mapping_check.get("results", []) or []
+                unmapped_numbers = [
+                    r.get("phone_number")
+                    for r in results
+                    if not r.get("is_mapped")
+                    or r.get("mapped_agent_id") != user_agent.pranthora_agent_id
+                ]
+                unmapped_numbers = [p for p in unmapped_numbers if p]
+
+                if unmapped_numbers:
+                    logger.info(
+                        f"[PhoneTest] Mapping {len(unmapped_numbers)} phone numbers to agent {user_agent.pranthora_agent_id}"
+                    )
+                    await self.pranthora_client.map_agent_to_phone_number(
+                        agent_id=user_agent.pranthora_agent_id,
+                        phone_numbers=unmapped_numbers,
+                    )
+            except Exception as map_err:
+                logger.error(
+                    f"[PhoneTest] Failed to verify/map phone numbers for agent {user_agent.pranthora_agent_id}: {map_err}",
+                    exc_info=True,
+                )
+                # Let execution continue; Pranthora may still route correctly if already configured
+
+            timeout_seconds = test_case.timeout_seconds or 300
+
+            # Initiate calls via Pranthora
+            call_results: list[Dict[str, Any]] = []
+
+            for idx in range(concurrent_calls):
+                try:
+                    resp = await self.pranthora_client.initiate_phone_call(
+                        target_phone_number=target_phone,
+                        pranthora_agent_id=user_agent.pranthora_agent_id,
+                    )
+                    call_results.append(resp)
+                    logger.info(
+                        f"[PhoneTest] Started call {idx + 1}/{concurrent_calls}: call_sid={resp.get('call_sid')}, "
+                        f"from={resp.get('from_phone_number')}, request_id={resp.get('request_id')}"
+                    )
+                except Exception as e:
+                    logger.error(f"[PhoneTest] Failed to initiate phone call {idx + 1}: {e}", exc_info=True)
+
+            if not call_results:
+                return {
+                    "conversation_logs": [],
+                    "audio_data": b"",
+                    "combined_audio_bytes": 0,
+                    "error_message": "Failed to initiate any phone calls via Pranthora",
+                    "success": False,
+                }
+
+            # Schedule call termination after timeout for each call
+            async def _end_call_later(call_sid: str, from_phone: str):
+                try:
+                    await asyncio.sleep(timeout_seconds)
+                    await self.pranthora_client.end_phone_call(call_sid, from_phone)
+                    # Give Pranthora a small buffer to persist transcripts/recordings
+                    await asyncio.sleep(5)
+                    logger.info(
+                        f"[PhoneTest] Ended phone call call_sid={call_sid}, from={from_phone} after timeout={timeout_seconds}s"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"[PhoneTest] Error ending phone call call_sid={call_sid}, from={from_phone}: {e}",
+                        exc_info=True,
+                    )
+
+            end_tasks = []
+            for r in call_results:
+                call_sid = r.get("call_sid")
+                from_phone = r.get("from_phone_number")
+                if call_sid and from_phone:
+                    end_tasks.append(asyncio.create_task(_end_call_later(call_sid, from_phone)))
+
+            # Wait for all calls to be ended and recordings/transcripts to be persisted
+            if end_tasks:
+                await asyncio.gather(*end_tasks, return_exceptions=True)
+
+            # Collect request_ids for transcript fetching
+            request_ids: list[str] = []
+            for r in call_results:
+                rid = r.get("request_id") or r.get("session_id")
+                if isinstance(rid, str) and rid:
+                    request_ids.append(rid)
+
+            logger.info(
+                f"[PhoneTest] Initiated {len(call_results)} phone calls for test case {test_case.id}. "
+                f"Timeout={timeout_seconds}s, request_ids={request_ids}"
+            )
+
+            return {
+                "conversation_logs": [],
+                "audio_data": b"",
+                "combined_audio_bytes": 0,
+                "audio_format": "external_pranthora_recording",
+                "duration_seconds": timeout_seconds,
+                "concurrent_calls": concurrent_calls,
+                "successful_calls": len(call_results),
+                "failed_calls": 0,
+                "recording_file_url": None,
+                "wav_file_ids": [],
+                "request_ids": request_ids,
+                "success": len(call_results) > 0,
+                "error_message": None,
+            }
+        except Exception as e:
+            logger.error(f"[PhoneTest] Error during phone test execution: {e}", exc_info=True)
             return {
                 "conversation_logs": [],
                 "audio_data": b"",
@@ -891,20 +1006,6 @@ class TestExecutionService:
             else:
                 base_ws_url = pranthora_base_url.replace("http://", "ws://")
 
-            # For target agent, we still need a websocket URL. If target_agent has a websocket_url, use it,
-            # otherwise construct one. But for now, let's use the configured URL and replace the port
-            target_ws_url = target_agent.websocket_url
-            if not target_ws_url.startswith(("ws://", "wss://")):
-                raise ValueError(f"Invalid target agent websocket URL: {target_ws_url}")
-
-            # Replace the port in target_ws_url with the port from pranthora_base_url
-            import re
-
-            port_match = re.search(r":(\d+)", pranthora_base_url)
-            if port_match:
-                pranthora_port = port_match.group(1)
-                target_ws_url = re.sub(r":\d+", f":{pranthora_port}", target_ws_url)
-
             user_ws_url = (
                 f"{base_ws_url}/api/call/media-stream/agents/{user_agent.pranthora_agent_id}"
             )
@@ -912,11 +1013,6 @@ class TestExecutionService:
             # Generate unique call SIDs for this conversation
             call_sid_target = str(uuid.uuid4())
             call_sid_user = request_id  # Use request_id as call_sid for User Agent to ensure transcript matching
-
-            # Add call_sid to URLs
-            if "call_sid=" not in target_ws_url:
-                separator = "&" if "?" in target_ws_url else "?"
-                target_ws_url = f"{target_ws_url}{separator}call_sid={call_sid_target}"
             user_ws_url = f"{user_ws_url}?call_sid={call_sid_user}"
 
             # Queues for this conversation
@@ -975,19 +1071,18 @@ class TestExecutionService:
             target_ready = asyncio.Event()
             user_ready = asyncio.Event()
 
-            # Start websocket connections for this conversation
-            # Target Agent Connection
-            target_manager = AgentConnectionManager(
-                name="Target",
-                ws_url=target_ws_url,
+            # Target Agent Connection (custom WebSocket/HTTP or Vapi via factory)
+            target_manager = await create_target_connection(
+                target_agent,
                 call_sid=call_sid_target,
-                incoming_queue=user_to_target_queue,  # Audio IN to this agent (read from other agent's output)
-                outgoing_queue=target_to_user_queue,  # Audio OUT from this agent (read from ws, put here)
+                incoming_queue=user_to_target_queue,
+                outgoing_queue=target_to_user_queue,
                 stop_event=stop_event,
                 my_ready=target_ready,
                 other_ready=user_ready,
-                sync_timeout=self.connection_sync_timeout,
                 record_sent_callback=lambda audio: record_audio_bridge(audio, "user_to_target"),
+                sync_timeout=self.connection_sync_timeout,
+                pranthora_base_url=pranthora_base_url,
             )
             target_task = asyncio.create_task(target_manager.connect())
 

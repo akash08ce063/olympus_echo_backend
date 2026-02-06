@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import List, Optional, Any, Dict
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class TestSuiteBase(BaseModel):
@@ -58,9 +58,37 @@ class TargetAgentBase(BaseModel):
 
     user_id: UUID = Field(..., description="User ID who owns this target agent")
     name: str = Field(..., min_length=1, max_length=255, description="Target agent name")
-    websocket_url: str = Field(..., min_length=1, max_length=500, description="WebSocket URL")
+    agent_type: str = Field(
+        "custom",
+        description="Target agent type: custom (ws/http), vapi, retell, phone. Stored as string.",
+    )
+    websocket_url: Optional[str] = Field(
+        "",
+        max_length=2000,
+        description="WebSocket or HTTP(S) URL for custom; empty for vapi/retell.",
+    )
     sample_rate: int = Field(16000, ge=1000, le=48000, description="Audio sample rate in Hz")
     encoding: str = Field("pcm_s16le", description="Audio encoding (e.g., pcm_s16le, opus, pcm_mulaw)")
+    connection_metadata: Optional[Dict[str, Any]] = Field(
+        None,
+        description="For custom URLs: HTTP metadata. For phone type: store target phone number as {'phone_number': '<E.164>'}.",
+    )
+    provider_config: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Provider-specific config e.g. vapi: assistant_id, api_key.",
+    )
+
+    @model_validator(mode="after")
+    def check_custom_has_url(self):
+        # Require non-empty websocket_url only for custom type; allow None when loading from DB (e.g. vapi/legacy rows).
+        if (self.agent_type or "custom").lower() != "custom":
+            return self
+        url = self.websocket_url
+        if url is None:
+            return self  # DB may return null for non-custom or legacy rows
+        if not (url or "").strip():
+            raise ValueError("websocket_url is required when agent_type is custom")
+        return self
 
 
 class TargetAgentCreate(TargetAgentBase):
@@ -72,9 +100,12 @@ class TargetAgentUpdate(BaseModel):
     """Model for updating a target agent."""
 
     name: Optional[str] = Field(None, min_length=1, max_length=255, description="Target agent name")
-    websocket_url: Optional[str] = Field(None, min_length=1, max_length=500, description="WebSocket URL")
+    agent_type: Optional[str] = Field(None, description="custom | vapi | retell")
+    websocket_url: Optional[str] = Field(None, max_length=2000, description="URL for custom type")
     sample_rate: Optional[int] = Field(None, ge=1000, le=48000, description="Audio sample rate in Hz")
     encoding: Optional[str] = Field(None, description="Audio encoding")
+    connection_metadata: Optional[Dict[str, Any]] = Field(None, description="For HTTP(S) custom URLs")
+    provider_config: Optional[Dict[str, Any]] = Field(None, description="Provider-specific config")
 
 
 class TargetAgent(TargetAgentBase):
@@ -93,6 +124,10 @@ class UserAgentBase(BaseModel):
     system_prompt: str = Field(..., description="System prompt for the agent")
     temperature: float = Field(0.7, ge=0.0, le=2.0, description="Temperature setting for the AI model")
     pranthora_agent_id: Optional[str] = Field(None, description="Corresponding agent ID in Pranthora backend")
+    phone_numbers: Optional[Dict[str, Any]] = Field(
+        None,
+        description="JSON config for phone tests: {'phone_numbers': ['+1555...', ...]}",
+    )
 
 
 class UserAgentCreate(UserAgentBase):
@@ -106,6 +141,10 @@ class UserAgentUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=255, description="User agent name")
     system_prompt: Optional[str] = Field(None, description="System prompt for the agent")
     temperature: Optional[float] = Field(None, ge=0.0, le=2.0, description="Temperature setting for the AI model")
+    phone_numbers: Optional[Dict[str, Any]] = Field(
+        None,
+        description="JSON config for phone tests: {'phone_numbers': ['+1555...', ...]}",
+    )
 
 
 class UserAgent(UserAgentBase):

@@ -74,9 +74,12 @@ class TestSuiteService(DatabaseService[TestSuite]):
                         id=ta_data['id'],
                         user_id=ta_data['user_id'],
                         name=ta_data['name'],
-                        websocket_url=ta_data['websocket_url'],
-                        sample_rate=ta_data['sample_rate'],
-                        encoding=ta_data['encoding'],
+                        agent_type=ta_data.get('agent_type') or 'custom',
+                        websocket_url=ta_data.get('websocket_url') or '',
+                        sample_rate=ta_data.get('sample_rate', 16000),
+                        encoding=ta_data.get('encoding') or 'pcm_s16le',
+                        connection_metadata=ta_data.get('connection_metadata'),
+                        provider_config=ta_data.get('provider_config'),
                         created_at=ta_data['created_at'],
                         updated_at=ta_data['updated_at']
                     )
@@ -99,6 +102,13 @@ class TestSuiteService(DatabaseService[TestSuite]):
                     if isinstance(model_config, str):
                         model_config = json.loads(model_config)
 
+                    phone_numbers = ua_data.get('phone_numbers')
+                    if isinstance(phone_numbers, str):
+                        try:
+                            phone_numbers = json.loads(phone_numbers)
+                        except Exception:
+                            phone_numbers = None
+
                     user_agent = UserAgent(
                         id=ua_data['id'],
                         user_id=ua_data['user_id'],
@@ -107,6 +117,7 @@ class TestSuiteService(DatabaseService[TestSuite]):
                         evaluation_criteria=evaluation_criteria,
                         agent_model_config=model_config,
                         pranthora_agent_id=ua_data.get('pranthora_agent_id'),
+                        phone_numbers=phone_numbers,
                         created_at=ua_data['created_at'],
                         updated_at=ua_data['updated_at']
                     )

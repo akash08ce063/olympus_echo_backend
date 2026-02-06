@@ -5,7 +5,7 @@ This module provides a client to interact with the Pranthora backend API
 for creating, updating, and managing agents.
 """
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import httpx
 from pydantic import BaseModel, Field
 
@@ -121,7 +121,7 @@ class PranthoraApiClient:
         """
         try:
             # Prepare the update request
-            update_data = {}
+            update_data: Dict[str, Any] = {}
 
             # Agent fields
             if any(
@@ -134,8 +134,10 @@ class PranthoraApiClient:
 
             # Model config fields
             if "system_prompt" in agent_data or "temperature" in agent_data:
+                # Fetch default model provider ID from Pranthora so we never send an invalid ID
+                default_provider_id = await self._get_default_model_provider_id()
                 update_data["agent_model_config"] = {
-                    "model_provider_id": "openai",
+                    "model_provider_id": default_provider_id,
                     "system_prompt": agent_data.get("system_prompt", ""),
                     "temperature": agent_data.get("temperature", 0.7),
                     "max_tokens": 4000,  # Keep default max tokens
@@ -166,6 +168,35 @@ class PranthoraApiClient:
 
         except Exception as e:
             logger.error(f"Error updating agent in Pranthora: {e}")
+            raise
+
+    async def _get_default_model_provider_id(self) -> str:
+        """
+        Fetch a default model_provider_id from Pranthora.
+
+        We call /api/v1/providers/model and prefer the one marked is_default,
+        falling back to the first provider in the list.
+        """
+        try:
+            url = f"{self.base_url}/api/v1/providers/model"
+            logger.debug("Fetching default model provider from Pranthora")
+            response = await self.client.get(url)
+            if response.status_code != 200:
+                raise Exception(f"provider list HTTP {response.status_code}: {response.text}")
+
+            data = response.json()
+            if not isinstance(data, list) or not data:
+                raise Exception("No model providers returned from Pranthora")
+
+            default_provider = next((p for p in data if p.get("is_default")), None)
+            provider = default_provider or data[0]
+            provider_id = provider.get("id")
+            if not provider_id:
+                raise Exception(f"Model provider object missing 'id': {provider}")
+            return provider_id
+        except Exception as e:
+            logger.error(f"Failed to fetch default model provider from Pranthora: {e}")
+            # Let caller see a clear failure; frontend will surface this
             raise
 
     async def get_agent(self, agent_id: str) -> Dict[str, Any]:
@@ -266,4 +297,109 @@ class PranthoraApiClient:
 
         except Exception as e:
             logger.error(f"❌ Error getting call logs from Pranthora for request_id {request_id}: {e}", exc_info=True)
+            raise
+
+    async def map_agent_to_phone_number(self, agent_id: str, phone_numbers: List[str]) -> Dict[str, Any]:
+        """
+        Map a Pranthora agent to a list of phone numbers.
+
+        This wraps the pranthora_backend /phone/map_agent_to_phone_number endpoint.
+        """
+        try:
+            url = f"{self.base_url}/api/v1/phone/map_agent_to_phone_number"
+            payload = {
+                "agent_id": agent_id,
+                "phone_numbers": phone_numbers,
+            }
+            logger.info(f"Mapping agent {agent_id} to {len(phone_numbers)} phone numbers via Pranthora")
+            response = await self.client.post(url, json=payload)
+            if response.status_code in (200, 201):
+                return response.json()
+            error_detail = response.text
+            logger.error(
+                f"Failed to map agent to phone numbers in Pranthora: {response.status_code} - {error_detail}"
+            )
+            raise Exception(f"Pranthora API error: {response.status_code} - {error_detail}")
+        except Exception as e:
+            logger.error(f"Error mapping agent to phone numbers in Pranthora: {e}")
+            raise
+
+    async def check_agent_phone_numbers_mapings(self, agent_id: str, phone_numbers: List[str]) -> Dict[str, Any]:
+        """
+        Check if the given phone numbers are mapped to the specified agent.
+
+        This wraps the pranthora_backend /phone/check_agent_phone_numbers_mapings endpoint.
+        """
+        try:
+            url = f"{self.base_url}/api/v1/phone/check_agent_phone_numbers_mapings"
+            payload = {
+                "agent_id": agent_id,
+                "phone_numbers": phone_numbers,
+            }
+            logger.info(f"Checking phone number mappings for agent {agent_id} via Pranthora")
+            response = await self.client.post(url, json=payload)
+            if response.status_code == 200:
+                return response.json()
+            error_detail = response.text
+            logger.error(
+                f"Failed to check phone number mappings in Pranthora: {response.status_code} - {error_detail}"
+            )
+            raise Exception(f"Pranthora API error: {response.status_code} - {error_detail}")
+        except Exception as e:
+            logger.error(f"Error checking agent phone number mappings in Pranthora: {e}")
+            raise
+
+    async def initiate_phone_call(self, target_phone_number: str, pranthora_agent_id: str) -> Dict[str, Any]:
+        """
+        Initiate an outbound phone call via Pranthora SDK /calls endpoint.
+
+        Args:
+            target_phone_number: E.164 phone number of the target agent.
+            pranthora_agent_id: Pranthora agent ID for the user agent (sent as agent_id query param).
+        """
+        try:
+            url = f"{self.base_url}/calls"
+            params = {
+                "phoneNumber": target_phone_number,
+                "agent_id": pranthora_agent_id,
+            }
+            logger.info(
+                f"Initiating phone call via Pranthora: target={target_phone_number}, agent_id={pranthora_agent_id}"
+            )
+            response = await self.client.post(url, params=params)
+            if response.status_code in (200, 201):
+                return response.json()
+            error_detail = response.text
+            logger.error(
+                f"Failed to initiate phone call via Pranthora: {response.status_code} - {error_detail}"
+            )
+            raise Exception(f"Pranthora API error: {response.status_code} - {error_detail}")
+        except Exception as e:
+            logger.error(f"Error initiating phone call via Pranthora: {e}")
+            raise
+
+    async def end_phone_call(self, call_sid: str, from_phone_number: str) -> None:
+        """
+        End an ongoing phone call via Pranthora SDK /calls/end endpoint.
+
+        Args:
+            call_sid: Twilio Call SID to end.
+            from_phone_number: Twilio phone number used as the caller ID.
+        """
+        try:
+            url = f"{self.base_url}/calls/end"
+            params = {
+                "call_sid": call_sid,
+                "from_phone_number": from_phone_number,
+            }
+            logger.info(f"Ending phone call via Pranthora: call_sid={call_sid}, from={from_phone_number}")
+            response = await self.client.post(url, params=params)
+            if response.status_code not in (200, 204):
+                error_detail = response.text
+                logger.error(
+                    f"Failed to end phone call via Pranthora: {response.status_code} - {error_detail}"
+                )
+                raise Exception(f"Pranthora API error: {response.status_code} - {error_detail}")
+        except Exception as e:
+            logger.error(f"Error ending phone call via Pranthora: {e}")
             raise
