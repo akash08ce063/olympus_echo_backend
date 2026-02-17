@@ -63,7 +63,18 @@ async def list_test_runs(
         )
 
         if not rpc_results:
-            return {"total": 0, "runs": []}
+            # Still need total count for pagination
+            count_filters = {"user_id": str(user_id)}
+            if suite_id:
+                count_filters["test_suite_id"] = str(suite_id)
+            total = await supabase_client.count("test_run_history", count_filters)
+            return {"total": total, "runs": []}
+
+        # Total count for pagination (same filters as RPC)
+        count_filters = {"user_id": str(user_id)}
+        if suite_id:
+            count_filters["test_suite_id"] = str(suite_id)
+        total_count = await supabase_client.count("test_run_history", count_filters)
 
         # Group results by run_id
         runs_map = {}
@@ -87,6 +98,9 @@ async def list_test_runs(
 
             # Add test case result if exists
             if row["result_id"]:
+                # Metadata from test_case_results (call_sids, request_ids, agent_type). Required for phone→Pranthora fetch.
+                raw_meta = row.get("metadata")
+                metadata = raw_meta if isinstance(raw_meta, dict) else {}
                 test_case_result = {
                     "result_id": str(row["result_id"]),
                     "test_case_id": str(row["test_case_id"]) if row["test_case_id"] else None,
@@ -101,6 +115,7 @@ async def list_test_runs(
                     "_started_at": row.get("result_started_at"),
                     "_completed_at": row.get("result_completed_at"),
                     "_transcript": None,
+                    "_metadata": metadata,
                 }
 
                 # Extract wav_file_ids from conversation_logs for signed URL generation
@@ -123,24 +138,59 @@ async def list_test_runs(
 
                 runs_map[run_id]["test_case_results"].append(test_case_result)
 
-        # Collect all result_ids for parallel transcript fetch (result_id is request_id in Pranthora)
-        all_result_ids = []
+        # Collect identifiers for parallel transcript fetch:
+        # - For non-phone runs, we use result_id as request_id in Pranthora.
+        # - For phone runs (agent_type == 'phone'), we use call_sids from metadata.
+        request_id_jobs = []  # list[str]
+        call_sid_jobs = []    # list[tuple[result_id, call_sid]]
         for run_data in runs_map.values():
             for result in run_data["test_case_results"]:
-                if result.get("result_id"):
-                    all_result_ids.append(result["result_id"])
+                rid = result.get("result_id")
+                if not rid:
+                    continue
+                meta = result.get("_metadata") or {}
+                agent_type = str(meta.get("agent_type", "")).lower()
+                call_sids = meta.get("call_sids") or []
+                if agent_type == "phone" and call_sids:
+                    # For phone calls, prefer call_sid-based analytics
+                    for csid in call_sids:
+                        if isinstance(csid, str) and csid:
+                            call_sid_jobs.append((rid, csid))
+                else:
+                    # Default: use result_id as request_id (websocket/custom/VAPI)
+                    request_id_jobs.append(rid)
 
-        async def fetch_transcript_safe(pranthora_client: PranthoraApiClient, req_id: str):
-            """Fetch transcript for one result_id; return (result_id, transcript_or_none). Never raise."""
+        async def fetch_call_logs_safe(pranthora_client: PranthoraApiClient, req_id: str):
+            """Fetch call logs (transcript + recording_url) for one request_id. Never raise."""
             try:
                 call_logs = await pranthora_client.get_call_logs(req_id)
-                transcript = call_logs.get("call_transcript") if call_logs else None
-                return (req_id, transcript)
+                if not call_logs:
+                    return (req_id, None, None)
+                transcript = call_logs.get("call_transcript")
+                recording_url = call_logs.get("recording_url")
+                return (req_id, transcript, recording_url)
             except Exception as e:
-                logger.debug(f"Transcript fetch failed for result_id={req_id}: {e}")
-                return (req_id, None)
+                logger.debug(f"Call logs fetch failed for result_id={req_id}: {e}")
+                return (req_id, None, None)
 
-        # Batch generate signed URLs and fetch transcripts from Pranthora in parallel
+        async def fetch_call_logs_by_call_sid_safe(
+            pranthora_client: PranthoraApiClient, result_id: str, call_sid: str
+        ):
+            """Fetch call logs (transcript + recording_url) for one call_sid, keyed by result_id. Never raise."""
+            try:
+                call_logs = await pranthora_client.get_call_logs_by_call_sid(call_sid)
+                if not call_logs:
+                    return (result_id, None, None)
+                transcript = call_logs.get("call_transcript")
+                recording_url = call_logs.get("recording_url")
+                return (result_id, transcript, recording_url)
+            except Exception as e:
+                logger.debug(
+                    f"Call logs fetch by call_sid failed for result_id={result_id}, call_sid={call_sid}: {e}"
+                )
+                return (result_id, None, None)
+
+        # Batch generate signed URLs and fetch transcripts + recording URLs from Pranthora in parallel
         all_url_tasks = []
         url_task_metadata = []  # Track metadata for each URL task in order
 
@@ -167,31 +217,37 @@ async def list_test_runs(
                             supabase_client.create_signed_url("recording_files", file_path, 3600)
                         )
 
-        # Run signed URL generation and Pranthora transcript fetches in parallel
+        # Run signed URL generation and Pranthora call-logs (transcript + recording_url) fetches in parallel
         signed_urls = []
         transcript_by_result_id = {}
-        if all_result_ids:
+        recording_url_by_result_id = {}
+        if request_id_jobs or call_sid_jobs:
             async with PranthoraApiClient() as pranthora_client:
-                transcript_tasks = [
-                    fetch_transcript_safe(pranthora_client, rid) for rid in all_result_ids
+                call_logs_tasks = [
+                    fetch_call_logs_safe(pranthora_client, rid) for rid in request_id_jobs
+                ] + [
+                    fetch_call_logs_by_call_sid_safe(pranthora_client, result_id, call_sid)
+                    for (result_id, call_sid) in call_sid_jobs
                 ]
                 if all_url_tasks:
                     logger.info(
-                        f"Generating {len(all_url_tasks)} signed URLs and {len(all_result_ids)} transcripts in parallel..."
+                        f"Generating {len(all_url_tasks)} signed URLs and {len(call_logs_tasks)} call logs in parallel..."
                     )
-                    url_results, trans_results = await asyncio.gather(
+                    url_results, logs_results = await asyncio.gather(
                         asyncio.gather(*all_url_tasks, return_exceptions=True),
-                        asyncio.gather(*transcript_tasks, return_exceptions=True),
+                        asyncio.gather(*call_logs_tasks, return_exceptions=True),
                     )
                     signed_urls = list(url_results)
                 else:
-                    logger.info(f"Fetching {len(all_result_ids)} transcripts from Pranthora in parallel...")
-                    trans_results = await asyncio.gather(*transcript_tasks, return_exceptions=True)
-                for outcome in trans_results:
+                    logger.info(f"Fetching {len(call_logs_tasks)} call logs from Pranthora in parallel...")
+                    logs_results = await asyncio.gather(*call_logs_tasks, return_exceptions=True)
+                for outcome in logs_results:
                     if isinstance(outcome, Exception):
                         continue
-                    rid, transcript = outcome
+                    rid, transcript, recording_url = outcome
                     transcript_by_result_id[rid] = transcript
+                    if recording_url:
+                        recording_url_by_result_id[rid] = recording_url
         elif all_url_tasks:
             logger.info(f"Generating {len(all_url_tasks)} signed URLs in parallel...")
             signed_urls = await asyncio.gather(*all_url_tasks, return_exceptions=True)
@@ -221,12 +277,30 @@ async def list_test_runs(
                         result.pop("wav_file_ids", None)
                         result.pop("test_case_id_for_urls", None)
 
-        # Store fetched transcripts into an internal field so we can expose them
-        # per-call below without adding outside-dependent fields to top-level
-        # objects.
-        for run_data in runs_map.values():
-            for result in run_data["test_case_results"]:
-                result["_transcript"] = transcript_by_result_id.get(result["result_id"])
+        # Store fetched transcripts and apply recording_url from Pranthora when DB has none
+        result_service = TestCaseResultService()
+        try:
+            for run_data in runs_map.values():
+                for result in run_data["test_case_results"]:
+                    result["_transcript"] = transcript_by_result_id.get(result["result_id"])
+                    # Use Pranthora recording_url when test_case_results.recording_file_url is missing
+                    pranthora_recording_url = recording_url_by_result_id.get(result["result_id"])
+                    if pranthora_recording_url and not result.get("recording_url"):
+                        result["recording_url"] = pranthora_recording_url
+                        if not result.get("call_recordings"):
+                            result["call_recordings"] = [
+                                {"call_number": 1, "recording_url": pranthora_recording_url}
+                            ]
+                        # Persist to DB so future fetches have recording_file_url
+                        try:
+                            await result_service.update(
+                                UUID(result["result_id"]),
+                                {"recording_file_url": pranthora_recording_url},
+                            )
+                        except Exception as e:
+                            logger.debug(f"Backfill recording_file_url for {result['result_id']}: {e}")
+        finally:
+            await result_service.close()
 
         # Reshape test_case_results to expose per-call details under a `calls` collection,
         # while keeping one logical test_case_result per test_case_id.
@@ -308,7 +382,7 @@ async def list_test_runs(
             f"✅ Fetched {len(grouped_runs)} test runs with results using RPC function in milliseconds"
         )
 
-        return {"total": len(grouped_runs), "runs": grouped_runs}
+        return {"total": total_count, "runs": grouped_runs}
 
     except HTTPException:
         raise

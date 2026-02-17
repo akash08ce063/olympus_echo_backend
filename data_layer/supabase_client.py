@@ -66,6 +66,19 @@ class SupabaseClient:
             logger.error(f"Error selecting from {table_name}: {str(e)}")
             return None
 
+    async def count(self, table_name: str, filters: Dict[str, Any] = None) -> int:
+        """Return total row count for the table with optional filters. Uses PostgREST count=exact."""
+        try:
+            query = self.async_client.table(table_name).select("*", count="exact").limit(1)
+            if filters:
+                for key, value in filters.items():
+                    query = query.eq(key, value)
+            result = await query.execute()
+            return getattr(result, "count", None) or len(result.data or [])
+        except Exception as e:
+            logger.error(f"Error counting {table_name}: {e}")
+            return 0
+
     async def update(self, table_name: str, filters: Dict[str, Any], data: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
         """Update data in a table."""
         try:

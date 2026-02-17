@@ -54,6 +54,15 @@ class TestRunHistoryService(DatabaseService[TestRunHistory]):
             logger.error(f"Error fetching test runs for suite {suite_id}: {e}")
             raise
 
+    async def count_test_runs_by_suite(self, suite_id: UUID) -> int:
+        """Return total number of test runs for a suite (for pagination)."""
+        supabase_client = await self._get_client()
+        try:
+            return await supabase_client.count("test_run_history", {"test_suite_id": str(suite_id)})
+        except Exception as e:
+            logger.error(f"Error counting test runs for suite {suite_id}: {e}")
+            return 0
+
     async def get_test_runs_by_user(
         self, user_id: UUID, limit: int = 100, offset: int = 0
     ) -> List[TestRunHistory]:
@@ -62,6 +71,22 @@ class TestRunHistoryService(DatabaseService[TestRunHistory]):
         # Filter out records with null test_suite_id to avoid validation errors
         filtered_results = [result for result in results if result.get('test_suite_id') is not None]
         return [TestRunHistory(**result) for result in filtered_results]
+
+    async def count_test_runs_by_user(self, user_id: UUID) -> int:
+        """Return total number of test runs for a user (for pagination). Excludes null test_suite_id."""
+        supabase_client = await self._get_client()
+        try:
+            result = await supabase_client.select(
+                "test_run_history",
+                filters={"user_id": str(user_id)},
+                order_by="started_at.desc"
+            )
+            if not result:
+                return 0
+            return len([r for r in result if r.get("test_suite_id") is not None])
+        except Exception as e:
+            logger.error(f"Error counting test runs for user {user_id}: {e}")
+            return 0
 
     async def get_test_run_with_results(self, run_id: UUID) -> Optional[TestRunWithResults]:
         """Get a test run with all its results."""

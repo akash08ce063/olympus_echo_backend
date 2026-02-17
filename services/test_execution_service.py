@@ -533,12 +533,20 @@ class TestExecutionService:
                         }
                     )
 
+                # Build metadata for downstream debugging/analytics (stored in test_case_results.metadata column if present)
+                metadata: Dict[str, Any] = {
+                    "request_ids": conversation_result.get("request_ids", []),
+                    "call_sids": conversation_result.get("call_sids", []),
+                    "agent_type": agent_type,
+                }
+
                 update_data = {
                     "status": status,
                     "conversation_logs": conversation_logs,  # Only metadata, no verbose logs
                     "evaluation_result": None,  # Will be updated by sequential evaluation
                     "error_message": conversation_result.get("error_message"),
                     "concurrent_calls": concurrent_calls_count,
+                    "metadata": metadata,
                 }
 
                 # No local recording URL; Pranthora provides recording_url via call_session metadata
@@ -931,16 +939,20 @@ class TestExecutionService:
             if end_tasks:
                 await asyncio.gather(*end_tasks, return_exceptions=True)
 
-            # Collect request_ids for transcript fetching
+            # Collect request_ids and call_sids for transcript fetching
             request_ids: list[str] = []
+            call_sids: list[str] = []
             for r in call_results:
                 rid = r.get("request_id") or r.get("session_id")
                 if isinstance(rid, str) and rid:
                     request_ids.append(rid)
+                csid = r.get("call_sid")
+                if isinstance(csid, str) and csid:
+                    call_sids.append(csid)
 
             logger.info(
                 f"[PhoneTest] Initiated {len(call_results)} phone calls for test case {test_case.id}. "
-                f"Timeout={timeout_seconds}s, request_ids={request_ids}"
+                f"Timeout={timeout_seconds}s, request_ids={request_ids}, call_sids={call_sids}"
             )
 
             return {
@@ -955,6 +967,7 @@ class TestExecutionService:
                 "recording_file_url": None,
                 "wav_file_ids": [],
                 "request_ids": request_ids,
+                "call_sids": call_sids,
                 "success": len(call_results) > 0,
                 "error_message": None,
             }
@@ -1217,22 +1230,32 @@ class TestExecutionService:
         """Sequential evaluation with retry logic for fetching transcripts."""
         try:
             request_ids = self._extract_request_ids(conversation_result)
-            if not request_ids:
-                logger.warning(f"No request_ids found for test case {test_case.id}")
-                # Update status to failed if no request_ids
+            call_sids: List[str] = conversation_result.get("call_sids", []) or []
+
+            if not request_ids and not call_sids:
+                logger.warning(
+                    f"No request_ids or call_sids found for test case {test_case.id} – cannot fetch transcript"
+                )
+                # Update status to failed if we have no identifiers at all
                 await self.test_result_service.update(
                     result_id,
                     {
                         "status": "failed",
-                        "error_message": "No request_ids found for transcript fetching",
+                        "error_message": "No request_ids or call_sids found for transcript fetching",
                     },
                 )
                 return None
 
             # Fetch transcript with more retries (10 retries, 5 second delay = up to 50 seconds wait)
-            transcript = await self._fetch_transcript_with_retry(
-                request_ids, max_retries=10, retry_delay=5
-            )
+            if request_ids:
+                transcript = await self._fetch_transcript_with_retry(
+                    request_ids, max_retries=10, retry_delay=5
+                )
+            else:
+                # Phone-to-phone calls: prefer call_sid-based analytics
+                transcript = await self._fetch_transcript_by_call_sids_with_retry(
+                    call_sids, max_retries=10, retry_delay=5
+                )
 
             if not transcript:
                 # All retries exhausted, update status to failed
@@ -1336,6 +1359,60 @@ class TestExecutionService:
             if not fetched:
                 logger.error(
                     f"❌ Failed to fetch transcript for request_id {request_id} after all {max_retries + 1} attempts"
+                )
+
+        return transcript
+
+    async def _fetch_transcript_by_call_sids_with_retry(
+        self, call_sids: List[str], max_retries: int = 10, retry_delay: int = 5
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch transcript for phone calls using call_sid with retry logic.
+        Returns empty list if all retries are exhausted.
+        """
+        transcript: List[Dict[str, Any]] = []
+        for call_sid in call_sids:
+            fetched = False
+            for attempt in range(max_retries + 1):
+                try:
+                    if attempt > 0:
+                        logger.info(
+                            f"Retry {attempt}/{max_retries} for call_sid {call_sid} (waiting {retry_delay}s)"
+                        )
+                        await asyncio.sleep(retry_delay)
+                    else:
+                        logger.info(f"Fetching transcript for call_sid: {call_sid}")
+
+                    call_logs = await self.pranthora_client.get_call_logs_by_call_sid(call_sid)
+                    if call_logs and call_logs.get("call_transcript"):
+                        transcript.extend(self._parse_transcript(call_logs["call_transcript"]))
+                        logger.info(
+                            f"✅ Successfully fetched {len(call_logs['call_transcript'])} messages for call_sid: {call_sid}"
+                        )
+                        fetched = True
+                        break
+                    elif call_logs:
+                        logger.warning(
+                            f"Call logs found for call_sid {call_sid} but no transcript available"
+                        )
+                    else:
+                        logger.debug(
+                            f"Call logs not found for call_sid {call_sid} (attempt {attempt + 1}/{max_retries + 1})"
+                        )
+
+                except Exception as e:
+                    if attempt < max_retries:
+                        logger.warning(
+                            f"Error fetching transcript for call_sid {call_sid} (attempt {attempt + 1}/{max_retries + 1}): {e}"
+                        )
+                    else:
+                        logger.error(
+                            f"Failed to fetch transcript for call_sid {call_sid} after {max_retries + 1} attempts: {e}"
+                        )
+
+            if not fetched:
+                logger.error(
+                    f"❌ Failed to fetch transcript for call_sid {call_sid} after all {max_retries + 1} attempts"
                 )
 
         return transcript

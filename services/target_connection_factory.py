@@ -1,5 +1,5 @@
 """
-Factory to create target connection: Vapi (credentials from target_agent.provider_config) or custom WebSocket.
+Factory to create target connection: Vapi, Retell (credentials from target_agent.provider_config) or custom WebSocket.
 """
 
 import re
@@ -9,6 +9,7 @@ from target_agent_type import TargetAgentType
 from services.agent_connection_manager import AgentConnectionManager
 from services.agent_url_resolver import resolve_target_agent_websocket_url
 from vapi import VapiConnectionManager
+from retell import RetellConnectionManager
 from telemetrics.logger import logger
 
 
@@ -28,7 +29,27 @@ async def create_target_connection(
     logger.info(f"[TargetConnectionFactory] agent_type={agent_type}")
 
     if agent_type == TargetAgentType.RETELL.value:
-        raise ValueError("Retell target agent is not supported yet")
+        pc = getattr(target_agent, "provider_config", None) or {}
+        agent_id = pc.get("agent_id") or ""
+        api_key = pc.get("api_key") or ""
+        if not agent_id or not api_key:
+            raise ValueError(
+                "Target agent (retell) missing provider_config.agent_id or "
+                "provider_config.api_key in database"
+            )
+        return RetellConnectionManager(
+            name="Target",
+            agent_id=agent_id.strip(),
+            api_key=api_key.strip(),
+            call_sid=call_sid,
+            incoming_queue=incoming_queue,
+            outgoing_queue=outgoing_queue,
+            stop_event=stop_event,
+            my_ready=my_ready,
+            other_ready=other_ready,
+            sync_timeout=sync_timeout,
+            record_sent_callback=record_sent_callback,
+        )
 
     if agent_type == TargetAgentType.VAPI.value:
         pc = getattr(target_agent, "provider_config", None) or {}
