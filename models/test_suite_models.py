@@ -161,7 +161,7 @@ class TestCaseBase(BaseModel):
     """Base model for test cases."""
 
     name: str = Field(..., min_length=1, max_length=255, description="Test case name")
-    goals: List[Dict[str, Any]] = Field(..., description="Array of test goals/prompts")
+    goals: Optional[List[Dict[str, Any]]] = Field(None, description="Array of test goals/prompts")
     evaluation_criteria: List[Dict[str, Any]] = Field(..., description="Array of evaluation criteria")
     timeout_seconds: int = Field(300, ge=1, description="Timeout in seconds")
     order_index: int = Field(0, ge=0, description="Order index for sorting")
@@ -174,6 +174,7 @@ class TestCaseCreate(TestCaseBase):
     """Model for creating a new test case."""
 
     test_suite_id: UUID = Field(..., description="ID of the test suite this case belongs to")
+    goals: Optional[List[Dict[str, Any]]] = Field(None, description="Array of test goals/prompts")
 
 
 class TestCaseUpdate(BaseModel):
