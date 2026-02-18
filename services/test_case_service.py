@@ -21,6 +21,9 @@ class TestCaseService(DatabaseService[TestCase]):
     async def create_test_case(self, data: TestCaseCreate) -> UUID:
         """Create a new test case."""
         case_data = data.model_dump()
+        # Ensure goals has a default empty entry instead of null for database compatibility
+        if case_data.get('goals') is None:
+            case_data['goals'] = [{"text": " "}]
         return await self.create(case_data)
 
     async def get_test_case(self, case_id: UUID) -> Optional[TestCase]:
@@ -60,6 +63,9 @@ class TestCaseService(DatabaseService[TestCase]):
     async def update_test_case(self, case_id: UUID, data: TestCaseUpdate) -> bool:
         """Update a test case."""
         update_data = data.model_dump(exclude_unset=True)
+        # Ensure goals has a default empty entry instead of null for database compatibility
+        if 'goals' in update_data and update_data['goals'] is None:
+            update_data['goals'] = [{"text": " "}]
         return await self.update(case_id, update_data)
 
     async def delete_test_case(self, case_id: UUID) -> bool:
