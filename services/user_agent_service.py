@@ -48,7 +48,8 @@ class UserAgentService(DatabaseService[UserAgent]):
                     "description": f"User agent: {data.name}",
                     "is_active": True,
                     "system_prompt": data.system_prompt,
-                    "temperature": data.temperature
+                    "temperature": data.temperature,
+                    "recording_enabled": True,  # Tester/user agents: keep recording enabled by default
                 })
 
                 # Store Pranthora agent ID in our database
@@ -110,13 +111,14 @@ class UserAgentService(DatabaseService[UserAgent]):
             # Get the agent to check if it has a pranthora_agent_id
             agent_result = await self.get_by_id(agent_id)
             if agent_result and agent_result.get("pranthora_agent_id"):
-                # Prepare data for Pranthora API
+                # Prepare data for Pranthora API (keep recording_enabled True for tester/user agents)
                 pranthora_update_data = {
                     "name": update_data.get("name"),
                     "system_prompt": update_data.get("system_prompt"),
-                    "temperature": update_data.get("temperature")
+                    "temperature": update_data.get("temperature"),
+                    "recording_enabled": True,
                 }
-                # Remove None values
+                # Remove None values (but keep recording_enabled True)
                 pranthora_update_data = {k: v for k, v in pranthora_update_data.items() if v is not None}
 
                 async with PranthoraApiClient() as client:

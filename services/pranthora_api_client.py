@@ -74,11 +74,12 @@ class PranthoraApiClient:
             Created agent response
         """
         try:
-            # Create SimpleAgentCreateRequest for simple agent creation
+            # Create SimpleAgentCreateRequest for simple agent creation (Olympus sends recording_enabled=True for tester/user agents)
             request_data = {
                 "name": agent_data.get("name", ""),
                 "system_prompt": agent_data.get("system_prompt"),
                 "temperature": agent_data.get("temperature", 0.7),
+                "recording_enabled": agent_data.get("recording_enabled", False),
             }
 
             url = f"{self.base_url}/api/v1/agents/simple"
@@ -123,12 +124,12 @@ class PranthoraApiClient:
             # Prepare the update request
             update_data: Dict[str, Any] = {}
 
-            # Agent fields
+            # Agent fields (include recording_enabled so tester/user agents keep it True)
             if any(
-                key in agent_data for key in ["name", "description", "is_active", "system_prompt"]
+                key in agent_data for key in ["name", "description", "is_active", "system_prompt", "recording_enabled"]
             ):
                 update_data["agent"] = {}
-                for field in ["name", "description", "is_active"]:
+                for field in ["name", "description", "is_active", "recording_enabled"]:
                     if field in agent_data:
                         update_data["agent"][field] = agent_data[field]
 
