@@ -340,6 +340,48 @@ class PranthoraApiClient:
             )
             raise
 
+    async def get_call_logs_by_call_session_id(self, call_session_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get call logs/session transcripts from Pranthora by call session ID (UUID).
+
+        Use this for phone-to-phone calls where transcript/recording are keyed by
+        call_session.id in Pranthora, not by request_id.
+        """
+        try:
+            url = f"{self.base_url}/api/v1/call-analytics/call-logs/by-call-session-id/{call_session_id}"
+            logger.info(f"📞 Fetching call logs from Pranthora for call_session_id: {call_session_id}, URL: {url}")
+
+            response = await self.client.get(url)
+            logger.info(
+                f"📞 Pranthora API response status: {response.status_code} for call_session_id: {call_session_id}"
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+                transcript_count = len(result.get("call_transcript", [])) if result.get("call_transcript") else 0
+                logger.info(
+                    f"✅ Successfully fetched call logs for call_session_id: {call_session_id}, "
+                    f"transcript messages: {transcript_count}"
+                )
+                return result
+            elif response.status_code == 404:
+                logger.warning(f"⚠️ Call logs not found for call_session_id: {call_session_id}")
+                return None
+            else:
+                error_detail = response.text
+                logger.error(
+                    f"❌ Failed to get call logs from Pranthora by call_session_id: "
+                    f"{response.status_code} - {error_detail}"
+                )
+                raise Exception(f"Pranthora API error: {response.status_code} - {error_detail}")
+
+        except Exception as e:
+            logger.error(
+                f"❌ Error getting call logs from Pranthora for call_session_id {call_session_id}: {e}",
+                exc_info=True,
+            )
+            raise
+
     async def map_agent_to_phone_number(self, agent_id: str, phone_numbers: List[str]) -> Dict[str, Any]:
         """
         Map a Pranthora agent to a list of phone numbers.

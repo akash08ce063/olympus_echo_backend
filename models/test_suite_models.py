@@ -197,7 +197,7 @@ class TestCase(TestCaseBase):
     test_suite_id: UUID = Field(..., description="ID of the test suite this case belongs to")
     created_at: datetime = Field(..., description="Creation timestamp")
     updated_at: datetime = Field(..., description="Last update timestamp")
-    status: Optional[str] = Field(None, description="Current status of the test case (running, completed, failed, pending)")
+    status: Optional[str] = Field(None, description="Current status of the test case (running, completed, failed, not-started)")
 
 
 class TestRunHistoryBase(BaseModel):

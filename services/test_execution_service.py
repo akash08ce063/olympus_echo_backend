@@ -11,7 +11,7 @@ import uuid
 import wave
 import audioop
 import io
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from uuid import UUID, uuid4
 from datetime import datetime
 from pydantic import BaseModel, Field
@@ -113,6 +113,54 @@ class TestExecutionService:
 
             if not test_cases:
                 raise ValueError(f"No active test cases found in test suite {test_suite_id}")
+
+            # Phone-type concurrency safety:
+            # - In PARALLEL mode, total concurrency across all test cases must not exceed tester's phone count
+            # - In SEQUENTIAL mode, each individual test case's concurrency must not exceed tester's phone count
+            target_agent = None
+            if test_suite.target_agent_id:
+                target_agent = await self.target_agent_service.get_target_agent(test_suite.target_agent_id)
+            user_agent = None
+            if test_suite.user_agent_id:
+                user_agent = await self.user_agent_service.get_user_agent(test_suite.user_agent_id)
+            if target_agent and user_agent:
+                agent_type = (getattr(target_agent, "agent_type", None) or "custom").lower()
+                if agent_type == "phone":
+                    phone_cfg = getattr(user_agent, "phone_numbers", None) or {}
+                    phone_list = []
+                    if isinstance(phone_cfg, dict):
+                        raw = phone_cfg.get("phone_numbers") or []
+                        if isinstance(raw, list):
+                            phone_list = [p for p in raw if isinstance(p, str) and p.strip()]
+                    # If there are no configured phone numbers, let the downstream phone path handle it
+                    if phone_list:
+                        phone_capacity = len(phone_list)
+
+                        # Helper to compute the effective concurrency for a single test case
+                        def _case_concurrency(tc: TestCase) -> int:
+                            if getattr(tc, "default_concurrent_calls", None) and tc.default_concurrent_calls > 0:
+                                return tc.default_concurrent_calls
+                            return concurrent_calls if concurrent_calls and concurrent_calls > 0 else 1
+
+                        if execution_mode == "parallel":
+                            # Parallel mode: sum of all case concurrencies cannot exceed phone capacity
+                            total_concurrency = sum(_case_concurrency(tc) for tc in test_cases)
+                            if total_concurrency > phone_capacity:
+                                raise ValueError(
+                                    f"Reduce concurrency to {phone_capacity} or fewer. "
+                                    f"Tester agent has {phone_capacity} phone number(s); total concurrency across test cases is {total_concurrency}."
+                                )
+                        else:
+                            # Sequential mode: allow multiple test cases as long as each one individually
+                            # does not exceed the phone capacity (e.g. each case concurrency <= 1 for a single number).
+                            for tc in test_cases:
+                                case_conc = _case_concurrency(tc)
+                                if case_conc > phone_capacity:
+                                    raise ValueError(
+                                        f"Test case '{tc.name}' has concurrency {case_conc}, "
+                                        f"but tester agent has only {phone_capacity} phone number(s). "
+                                        f"Reduce this test case's concurrency."
+                                    )
 
             # Use first request_id for test run creation (backward compatibility)
             primary_request_id = request_ids[0] if request_ids and len(request_ids) > 0 else None
@@ -533,10 +581,13 @@ class TestExecutionService:
                         }
                     )
 
-                # Build metadata for downstream debugging/analytics (stored in test_case_results.metadata column if present)
+                # Exactly one request_id per row: this row's id IS the request_id (primary key).
+                # Do not store request_ids (plural); each row = one call = one request_id only.
+                call_sids = conversation_result.get("call_sids", []) or []
+                this_call_sid = call_sids[idx] if agent_type == "phone" and idx < len(call_sids) else None
                 metadata: Dict[str, Any] = {
-                    "request_ids": conversation_result.get("request_ids", []),
-                    "call_sids": conversation_result.get("call_sids", []),
+                    "request_id": call_request_id,
+                    "call_sids": [this_call_sid] if this_call_sid else [],
                     "agent_type": agent_type,
                 }
 
@@ -572,28 +623,37 @@ class TestExecutionService:
                 updated_result_ids[0] if updated_result_ids else created_result_ids[0]
             )
 
-            # Run evaluation sequentially with retries (transcripts need time to persist)
-            # Evaluation runs on the first result, but we'll update all entries with the same result
-            evaluation_result = await self._evaluate_test_results_sequential(
-                test_case, conversation_result, user_agent, test_run_id, primary_result_id
+            # Evaluate each call separately so each test_case_result gets its own evaluation
+            evaluation_results_map, call_session_ids_map = await self._evaluate_per_call(
+                test_case, conversation_result, user_agent, test_run_id,
+                call_request_ids, updated_result_ids,
             )
-            logger.info(f"Completed evaluation for test case {test_case.id}")
+            logger.info(f"Completed per-call evaluation for test case {test_case.id}")
 
-            # Update ALL test_case_result entries with the same evaluation result and status
-            # (The primary_result_id was already updated by _evaluate_test_results_sequential)
-            if evaluation_result:
-                # Determine final status based on evaluation
-                final_status = self._determine_test_status(evaluation_result)
-
-                # Update all entries (including primary, which is idempotent) with the same evaluation result and status
-                for result_id in updated_result_ids:
+            # Update each test_case_result with its own evaluation result, status, and call_session_id (phone)
+            for result_id in updated_result_ids:
+                rid_str = str(result_id)
+                eval_result = evaluation_results_map.get(rid_str)
+                if eval_result:
+                    final_status = self._determine_test_status(eval_result)
+                    update_payload: Dict[str, Any] = {
+                        "status": final_status,
+                        "evaluation_result": eval_result,
+                    }
+                    call_session_id = call_session_ids_map.get(rid_str)
+                    if call_session_id:
+                        # Merge call_session_id into metadata for phone; used for transcript/recording fetch
+                        try:
+                            existing = await self.test_result_service.get_by_id(result_id)
+                            meta = dict((existing or {}).get("metadata") or {})
+                            meta["call_session_id"] = call_session_id
+                            update_payload["metadata"] = meta
+                        except Exception:
+                            update_payload["metadata"] = {"call_session_id": call_session_id}
                     try:
-                        await self.test_result_service.update(
-                            result_id,
-                            {"status": final_status, "evaluation_result": evaluation_result},
-                        )
+                        await self.test_result_service.update(result_id, update_payload)
                         logger.info(
-                            f"Updated test case result {result_id} with evaluation result and status {final_status}"
+                            f"Updated test case result {result_id} with per-call evaluation, status {final_status}"
                         )
                     except Exception as e:
                         logger.error(
@@ -1219,6 +1279,111 @@ class TestExecutionService:
 
     # _connect_target_agent and _connect_user_agent removed in favor of AgentConnectionManager
 
+    async def _evaluate_per_call(
+        self,
+        test_case: TestCase,
+        conversation_result: Dict[str, Any],
+        user_agent,
+        test_run_id: UUID,
+        call_request_ids: List[str],
+        updated_result_ids: List[UUID],
+    ) -> Tuple[Dict[str, Any], Dict[str, Optional[str]]]:
+        """Evaluate each concurrent call separately.
+
+        Returns (evaluation_map, call_session_ids_map).
+        evaluation_map: result_id (str) -> evaluation_result dict.
+        call_session_ids_map: result_id (str) -> call_session_id from Pranthora (phone only).
+        """
+        evaluation_map: Dict[str, Any] = {}
+
+        request_ids = self._extract_request_ids(conversation_result)
+        call_sids: List[str] = conversation_result.get("call_sids", []) or []
+        agent_type = (conversation_result.get("agent_type") or "").lower()
+
+        if not request_ids and not call_sids:
+            logger.warning(
+                f"No request_ids or call_sids found for test case {test_case.id} – cannot fetch transcripts"
+            )
+            for result_id in updated_result_ids:
+                await self.test_result_service.update(
+                    result_id,
+                    {"status": "failed", "error_message": "No identifiers for transcript fetching"},
+                )
+            return evaluation_map, {}
+
+        # Build a list of (result_id, identifier, fetch_type) tuples.
+        # For phone: use call_sid (call_session_id is not available until we fetch and get it from response).
+        fetch_jobs: List[tuple] = []
+        for idx, result_id in enumerate(updated_result_ids):
+            rid_str = str(result_id)
+            if agent_type == "phone" and call_sids and idx < len(call_sids):
+                fetch_jobs.append((rid_str, call_sids[idx], "call_sid"))
+            elif idx < len(request_ids):
+                fetch_jobs.append((rid_str, request_ids[idx], "request_id"))
+            elif idx < len(call_request_ids):
+                fetch_jobs.append((rid_str, call_request_ids[idx], "request_id"))
+
+        # Fetch all transcripts in parallel. For phone we use call_sid and get back call_session_id from response.
+        async def _fetch_one(job):
+            rid_str, identifier, fetch_type = job
+            call_session_id_out = None
+            if fetch_type == "call_sid":
+                transcript, call_session_id_out = await self._fetch_one_call_sid_transcript_and_session_id(
+                    identifier, max_retries=5, retry_delay=5
+                )
+            elif fetch_type == "call_session_id":
+                transcript, call_session_id_out = await self._fetch_one_call_session_id_transcript(
+                    identifier, max_retries=5, retry_delay=5
+                )
+            else:
+                transcript = await self._fetch_one_request_id_transcript(identifier, max_retries=5, retry_delay=5)
+            return rid_str, transcript, call_session_id_out
+
+        fetch_results = await asyncio.gather(
+            *[_fetch_one(job) for job in fetch_jobs], return_exceptions=True,
+        )
+
+        transcripts_map: Dict[str, List[Dict[str, Any]]] = {}
+        call_session_ids_map: Dict[str, Optional[str]] = {}
+        for r in fetch_results:
+            if isinstance(r, Exception):
+                logger.error(f"Transcript fetch error: {r}")
+                continue
+            rid_str, transcript, call_session_id_out = r
+            transcripts_map[rid_str] = transcript
+            if call_session_id_out:
+                call_session_ids_map[rid_str] = call_session_id_out
+
+        # Evaluate each call in parallel
+        async def _eval_one(rid_str: str, transcript: List[Dict[str, Any]]):
+            if not transcript:
+                logger.warning(f"No transcript for result {rid_str}, marking failed")
+                try:
+                    await self.test_result_service.update(
+                        UUID(rid_str),
+                        {"status": "failed", "error_message": "No transcript after retries"},
+                    )
+                except Exception:
+                    pass
+                return rid_str, None
+            eval_result = await self._run_evaluation(test_case, transcript, user_agent)
+            return rid_str, eval_result
+
+        eval_results = await asyncio.gather(
+            *[_eval_one(rid, transcripts_map.get(rid, [])) for rid, _, _ in fetch_jobs],
+            return_exceptions=True,
+        )
+
+        for r in eval_results:
+            if isinstance(r, Exception):
+                logger.error(f"Evaluation error: {r}")
+                continue
+            rid_str, eval_result = r
+            if eval_result:
+                evaluation_map[rid_str] = eval_result
+
+        return evaluation_map, call_session_ids_map
+
     async def _evaluate_test_results_sequential(
         self,
         test_case: TestCase,
@@ -1227,7 +1392,7 @@ class TestExecutionService:
         test_run_id: UUID,
         result_id: UUID,
     ):
-        """Sequential evaluation with retry logic for fetching transcripts."""
+        """Legacy single-call evaluation with retry logic for fetching transcripts."""
         try:
             request_ids = self._extract_request_ids(conversation_result)
             call_sids: List[str] = conversation_result.get("call_sids", []) or []
@@ -1236,7 +1401,6 @@ class TestExecutionService:
                 logger.warning(
                     f"No request_ids or call_sids found for test case {test_case.id} – cannot fetch transcript"
                 )
-                # Update status to failed if we have no identifiers at all
                 await self.test_result_service.update(
                     result_id,
                     {
@@ -1246,19 +1410,16 @@ class TestExecutionService:
                 )
                 return None
 
-            # Fetch transcript with more retries (10 retries, 5 second delay = up to 50 seconds wait)
             if request_ids:
                 transcript = await self._fetch_transcript_with_retry(
-                    request_ids, max_retries=10, retry_delay=5
+                    request_ids, max_retries=5, retry_delay=5
                 )
             else:
-                # Phone-to-phone calls: prefer call_sid-based analytics
                 transcript = await self._fetch_transcript_by_call_sids_with_retry(
-                    call_sids, max_retries=10, retry_delay=5
+                    call_sids, max_retries=5, retry_delay=5
                 )
 
             if not transcript:
-                # All retries exhausted, update status to failed
                 logger.error(
                     f"Failed to fetch transcript after all retries for test case {test_case.id}"
                 )
@@ -1271,18 +1432,9 @@ class TestExecutionService:
                 )
                 return None
 
-            # Run evaluation
             evaluation_result = await self._run_evaluation(test_case, transcript, user_agent)
 
-            # Update evaluation result
-            await self._update_test_case_result_with_evaluation(
-                test_run_id, test_case.id, evaluation_result
-            )
-
-            # Determine final status based on evaluation
             final_status = self._determine_test_status(evaluation_result)
-
-            # Update status to complete (pass/alert/fail based on evaluation)
             await self.test_result_service.update(
                 result_id, {"status": final_status, "evaluation_result": evaluation_result}
             )
@@ -1294,7 +1446,6 @@ class TestExecutionService:
 
         except Exception as e:
             logger.error(f"Sequential evaluation error: {e}", exc_info=True)
-            # Update status to failed on exception
             try:
                 await self.test_result_service.update(
                     result_id, {"status": "failed", "error_message": f"Evaluation error: {str(e)}"}
@@ -1312,109 +1463,186 @@ class TestExecutionService:
                 request_ids = [single_id]
         return request_ids
 
-    async def _fetch_transcript_with_retry(
-        self, request_ids: List[str], max_retries: int = 10, retry_delay: int = 5
+    async def _fetch_one_request_id_transcript(
+        self, request_id: str, max_retries: int = 5, retry_delay: int = 5
     ) -> List[Dict[str, Any]]:
-        """Fetch transcript with retry logic. Returns empty list if all retries exhausted."""
+        """Fetch transcript for a single request_id with retries. Used in parallel with others."""
+        for attempt in range(max_retries + 1):
+            try:
+                if attempt > 0:
+                    logger.info(
+                        f"Retry {attempt}/{max_retries} for request_id {request_id} (waiting {retry_delay}s)"
+                    )
+                    await asyncio.sleep(retry_delay)
+                else:
+                    logger.info(f"Fetching transcript for request_id: {request_id}")
+                call_logs = await self.pranthora_client.get_call_logs(request_id)
+                if call_logs and call_logs.get("call_transcript"):
+                    logger.info(
+                        f"✅ Successfully fetched {len(call_logs['call_transcript'])} messages for request_id: {request_id}"
+                    )
+                    return self._parse_transcript(call_logs["call_transcript"])
+                elif call_logs:
+                    logger.warning(
+                        f"Call logs found for {request_id} but no transcript available"
+                    )
+                else:
+                    logger.debug(
+                        f"Call logs not found for {request_id} (attempt {attempt + 1}/{max_retries + 1})"
+                    )
+            except Exception as e:
+                if attempt < max_retries:
+                    logger.warning(
+                        f"Error fetching transcript for {request_id} (attempt {attempt + 1}/{max_retries + 1}): {e}"
+                    )
+                else:
+                    logger.error(
+                        f"Failed to fetch transcript for {request_id} after {max_retries + 1} attempts: {e}"
+                    )
+        logger.error(
+            f"❌ Failed to fetch transcript for request_id {request_id} after all {max_retries + 1} attempts"
+        )
+        return []
+
+    async def _fetch_transcript_with_retry(
+        self, request_ids: List[str], max_retries: int = 5, retry_delay: int = 5
+    ) -> List[Dict[str, Any]]:
+        """Fetch transcripts with retry logic; one task per request_id (parallel). Returns combined transcript."""
+        if not request_ids:
+            return []
+        tasks = [
+            self._fetch_one_request_id_transcript(rid, max_retries=max_retries, retry_delay=retry_delay)
+            for rid in request_ids
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
         transcript = []
-        for request_id in request_ids:
-            fetched = False
-            for attempt in range(max_retries + 1):
-                try:
-                    if attempt > 0:
-                        logger.info(
-                            f"Retry {attempt}/{max_retries} for request_id {request_id} (waiting {retry_delay}s)"
-                        )
-                        await asyncio.sleep(retry_delay)
-                    else:
-                        logger.info(f"Fetching transcript for request_id: {request_id}")
-
-                    call_logs = await self.pranthora_client.get_call_logs(request_id)
-                    if call_logs and call_logs.get("call_transcript"):
-                        transcript.extend(self._parse_transcript(call_logs["call_transcript"]))
-                        logger.info(
-                            f"✅ Successfully fetched {len(call_logs['call_transcript'])} messages for request_id: {request_id}"
-                        )
-                        fetched = True
-                        break
-                    elif call_logs:
-                        logger.warning(
-                            f"Call logs found for {request_id} but no transcript available"
-                        )
-                    else:
-                        logger.debug(
-                            f"Call logs not found for request_id {request_id} (attempt {attempt + 1}/{max_retries + 1})"
-                        )
-
-                except Exception as e:
-                    if attempt < max_retries:
-                        logger.warning(
-                            f"Error fetching transcript for {request_id} (attempt {attempt + 1}/{max_retries + 1}): {e}"
-                        )
-                    else:
-                        logger.error(
-                            f"Failed to fetch transcript for {request_id} after {max_retries + 1} attempts: {e}"
-                        )
-
-            if not fetched:
-                logger.error(
-                    f"❌ Failed to fetch transcript for request_id {request_id} after all {max_retries + 1} attempts"
-                )
-
+        for i, r in enumerate(results):
+            if isinstance(r, Exception):
+                logger.error(f"Transcript fetch failed for request_id {request_ids[i]}: {r}")
+            else:
+                transcript.extend(r)
         return transcript
 
+
+    async def _fetch_one_call_sid_transcript(
+        self, call_sid: str, max_retries: int = 5, retry_delay: int = 5
+    ) -> List[Dict[str, Any]]:
+        """Fetch transcript for a single call_sid with retries. Used in parallel with others."""
+        transcript, _ = await self._fetch_one_call_sid_transcript_and_session_id(
+            call_sid, max_retries=max_retries, retry_delay=retry_delay
+        )
+        return transcript
+
+    async def _fetch_one_call_sid_transcript_and_session_id(
+        self, call_sid: str, max_retries: int = 5, retry_delay: int = 5
+    ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        """Fetch transcript and call_session_id for a single call_sid (phone). Returns (transcript, call_session_id)."""
+        for attempt in range(max_retries + 1):
+            try:
+                if attempt > 0:
+                    logger.info(
+                        f"Retry {attempt}/{max_retries} for call_sid {call_sid} (waiting {retry_delay}s)"
+                    )
+                    await asyncio.sleep(retry_delay)
+                else:
+                    logger.info(f"Fetching transcript for call_sid: {call_sid}")
+
+                call_logs = await self.pranthora_client.get_call_logs_by_call_sid(call_sid)
+                if call_logs and call_logs.get("call_transcript"):
+                    logger.info(
+                        f"✅ Successfully fetched {len(call_logs['call_transcript'])} messages for call_sid: {call_sid}"
+                    )
+                    transcript = self._parse_transcript(call_logs["call_transcript"])
+                    call_session_id = call_logs.get("id")  # Pranthora call_session.id for transcript/recording
+                    return transcript, call_session_id
+                elif call_logs:
+                    logger.warning(
+                        f"Call logs found for call_sid {call_sid} but no transcript available"
+                    )
+                else:
+                    logger.debug(
+                        f"Call logs not found for call_sid {call_sid} (attempt {attempt + 1}/{max_retries + 1})"
+                    )
+            except Exception as e:
+                if attempt < max_retries:
+                    logger.warning(
+                        f"Error fetching transcript for call_sid {call_sid} (attempt {attempt + 1}/{max_retries + 1}): {e}"
+                    )
+                else:
+                    logger.error(
+                        f"Failed to fetch transcript for call_sid {call_sid} after {max_retries + 1} attempts: {e}"
+                    )
+        logger.error(
+            f"❌ Failed to fetch transcript for call_sid {call_sid} after all {max_retries + 1} attempts"
+        )
+        return [], None
+
+    async def _fetch_one_call_session_id_transcript(
+        self, call_session_id: str, max_retries: int = 5, retry_delay: int = 5
+    ) -> Tuple[List[Dict[str, Any]], str]:
+        """Fetch transcript by Pranthora call_session ID (phone). Returns (transcript, call_session_id)."""
+        for attempt in range(max_retries + 1):
+            try:
+                if attempt > 0:
+                    logger.info(
+                        f"Retry {attempt}/{max_retries} for call_session_id {call_session_id} (waiting {retry_delay}s)"
+                    )
+                    await asyncio.sleep(retry_delay)
+                else:
+                    logger.info(f"Fetching transcript for call_session_id: {call_session_id}")
+
+                call_logs = await self.pranthora_client.get_call_logs_by_call_session_id(call_session_id)
+                if call_logs and call_logs.get("call_transcript"):
+                    logger.info(
+                        f"✅ Successfully fetched {len(call_logs['call_transcript'])} messages for call_session_id: {call_session_id}"
+                    )
+                    transcript = self._parse_transcript(call_logs["call_transcript"])
+                    return transcript, call_session_id
+                elif call_logs:
+                    logger.warning(
+                        f"Call logs found for call_session_id {call_session_id} but no transcript available"
+                    )
+                else:
+                    logger.debug(
+                        f"Call logs not found for call_session_id {call_session_id} "
+                        f"(attempt {attempt + 1}/{max_retries + 1})"
+                    )
+            except Exception as e:
+                if attempt < max_retries:
+                    logger.warning(
+                        f"Error fetching transcript for call_session_id {call_session_id} "
+                        f"(attempt {attempt + 1}/{max_retries + 1}): {e}"
+                    )
+                else:
+                    logger.error(
+                        f"Failed to fetch transcript for call_session_id {call_session_id} "
+                        f"after {max_retries + 1} attempts: {e}"
+                    )
+        logger.error(
+            f"❌ Failed to fetch transcript for call_session_id {call_session_id} after all {max_retries + 1} attempts"
+        )
+        return [], call_session_id
+
     async def _fetch_transcript_by_call_sids_with_retry(
-        self, call_sids: List[str], max_retries: int = 10, retry_delay: int = 5
+        self, call_sids: List[str], max_retries: int = 5, retry_delay: int = 5
     ) -> List[Dict[str, Any]]:
         """
-        Fetch transcript for phone calls using call_sid with retry logic.
-        Returns empty list if all retries are exhausted.
+        Fetch transcript for phone calls using call_sid with retry logic; one task per call_sid (parallel).
+        Returns combined transcript.
         """
+        if not call_sids:
+            return []
+        tasks = [
+            self._fetch_one_call_sid_transcript(sid, max_retries=max_retries, retry_delay=retry_delay)
+            for sid in call_sids
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
         transcript: List[Dict[str, Any]] = []
-        for call_sid in call_sids:
-            fetched = False
-            for attempt in range(max_retries + 1):
-                try:
-                    if attempt > 0:
-                        logger.info(
-                            f"Retry {attempt}/{max_retries} for call_sid {call_sid} (waiting {retry_delay}s)"
-                        )
-                        await asyncio.sleep(retry_delay)
-                    else:
-                        logger.info(f"Fetching transcript for call_sid: {call_sid}")
-
-                    call_logs = await self.pranthora_client.get_call_logs_by_call_sid(call_sid)
-                    if call_logs and call_logs.get("call_transcript"):
-                        transcript.extend(self._parse_transcript(call_logs["call_transcript"]))
-                        logger.info(
-                            f"✅ Successfully fetched {len(call_logs['call_transcript'])} messages for call_sid: {call_sid}"
-                        )
-                        fetched = True
-                        break
-                    elif call_logs:
-                        logger.warning(
-                            f"Call logs found for call_sid {call_sid} but no transcript available"
-                        )
-                    else:
-                        logger.debug(
-                            f"Call logs not found for call_sid {call_sid} (attempt {attempt + 1}/{max_retries + 1})"
-                        )
-
-                except Exception as e:
-                    if attempt < max_retries:
-                        logger.warning(
-                            f"Error fetching transcript for call_sid {call_sid} (attempt {attempt + 1}/{max_retries + 1}): {e}"
-                        )
-                    else:
-                        logger.error(
-                            f"Failed to fetch transcript for call_sid {call_sid} after {max_retries + 1} attempts: {e}"
-                        )
-
-            if not fetched:
-                logger.error(
-                    f"❌ Failed to fetch transcript for call_sid {call_sid} after all {max_retries + 1} attempts"
-                )
-
+        for i, r in enumerate(results):
+            if isinstance(r, Exception):
+                logger.error(f"Transcript fetch failed for call_sid {call_sids[i]}: {r}")
+            else:
+                transcript.extend(r)
         return transcript
 
     def _parse_transcript(self, call_transcript: List[Any]) -> List[Dict[str, Any]]:

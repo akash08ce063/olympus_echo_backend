@@ -177,7 +177,7 @@ class TestSuiteService(DatabaseService[TestSuite]):
             test_cases = []
             for tc_data in result.data:
                 tc_id = str(tc_data['id'])
-                status = test_case_statuses.get(tc_id, "pending") if test_case_statuses else "pending"
+                status = test_case_statuses.get(tc_id, "not-started") if test_case_statuses else "not-started"
                 tc_data['status'] = status
                 test_cases.append(TestCase(**tc_data))
 
@@ -321,7 +321,7 @@ class TestSuiteService(DatabaseService[TestSuite]):
         """
         Get suite status based on latest test run for the suite.
         
-        Status values: pending, running, failed, completed
+        Status values: not-started, running, failed, completed
         """
         try:
             from supabase.client import acreate_client
@@ -345,7 +345,7 @@ class TestSuiteService(DatabaseService[TestSuite]):
                 return None  # No test runs = no status
 
             # Return status directly from latest run
-            return result.data[0].get('status', 'pending')
+            return result.data[0].get('status', 'not-started')
 
         except Exception as e:
             logger.error(f"Error getting suite status for {suite_id}: {e}")
@@ -354,7 +354,7 @@ class TestSuiteService(DatabaseService[TestSuite]):
     async def _get_test_case_statuses(self, suite_id: UUID) -> Dict[str, str]:
         """
         Get latest status for each test case from test_case_results.
-        Status values: pending, running, failed, completed
+        Status values: not-started, running, failed, completed
         """
         try:
             from supabase.client import acreate_client
@@ -382,7 +382,7 @@ class TestSuiteService(DatabaseService[TestSuite]):
             for record in results.data:
                 tc_id = record.get('test_case_id')
                 if tc_id and tc_id not in statuses:
-                    statuses[tc_id] = record.get('status', 'pending')
+                    statuses[tc_id] = record.get('status', 'not-started')
 
             return statuses
 

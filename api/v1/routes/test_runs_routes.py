@@ -98,7 +98,7 @@ async def list_test_runs(
 
             # Add test case result if exists
             if row["result_id"]:
-                # Metadata from test_case_results (call_sids, request_ids, agent_type). Required for phone→Pranthora fetch.
+                # Metadata from test_case_results: request_id (single, equals row id), call_sids, agent_type. Required for phone→Pranthora fetch.
                 raw_meta = row.get("metadata")
                 metadata = raw_meta if isinstance(raw_meta, dict) else {}
                 test_case_result = {
@@ -115,6 +115,7 @@ async def list_test_runs(
                     "_started_at": row.get("result_started_at"),
                     "_completed_at": row.get("result_completed_at"),
                     "_transcript": None,
+                    "_conversation_logs": row.get("conversation_logs") or [],
                     "_metadata": metadata,
                 }
 
@@ -139,25 +140,28 @@ async def list_test_runs(
                 runs_map[run_id]["test_case_results"].append(test_case_result)
 
         # Collect identifiers for parallel transcript fetch:
-        # - For non-phone runs, we use result_id as request_id in Pranthora.
-        # - For phone runs (agent_type == 'phone'), we use call_sids from metadata.
-        request_id_jobs = []  # list[str]
-        call_sid_jobs = []    # list[tuple[result_id, call_sid]]
+        # - Phone: use call_session_id or call_sids (never request_id - avoids 404s and extra latency).
+        # - Web/VAPI: use result_id as request_id in Pranthora.
+        request_id_jobs = []       # list[str]
+        call_sid_jobs = []         # list[tuple[result_id, call_sid]]
+        call_session_id_jobs = []  # list[tuple[result_id, call_session_id]]
         for run_data in runs_map.values():
             for result in run_data["test_case_results"]:
                 rid = result.get("result_id")
                 if not rid:
                     continue
                 meta = result.get("_metadata") or {}
-                agent_type = str(meta.get("agent_type", "")).lower()
+                call_session_id = meta.get("call_session_id")
                 call_sids = meta.get("call_sids") or []
-                if agent_type == "phone" and call_sids:
-                    # For phone calls, prefer call_sid-based analytics
+                # Treat as phone if we have call_session_id or call_sids (avoids request_id 404s for phone)
+                if isinstance(call_session_id, str) and call_session_id:
+                    call_session_id_jobs.append((rid, call_session_id))
+                elif call_sids:
                     for csid in call_sids:
                         if isinstance(csid, str) and csid:
                             call_sid_jobs.append((rid, csid))
                 else:
-                    # Default: use result_id as request_id (websocket/custom/VAPI)
+                    # Web/VAPI: use result_id as request_id
                     request_id_jobs.append(rid)
 
         async def fetch_call_logs_safe(pranthora_client: PranthoraApiClient, req_id: str):
@@ -187,6 +191,24 @@ async def list_test_runs(
             except Exception as e:
                 logger.debug(
                     f"Call logs fetch by call_sid failed for result_id={result_id}, call_sid={call_sid}: {e}"
+                )
+                return (result_id, None, None)
+
+        async def fetch_call_logs_by_call_session_id_safe(
+            pranthora_client: PranthoraApiClient, result_id: str, call_session_id: str
+        ):
+            """Fetch call logs by Pranthora call_session ID (phone). Never raise."""
+            try:
+                call_logs = await pranthora_client.get_call_logs_by_call_session_id(call_session_id)
+                if not call_logs:
+                    return (result_id, None, None)
+                transcript = call_logs.get("call_transcript")
+                recording_url = call_logs.get("recording_url")
+                return (result_id, transcript, recording_url)
+            except Exception as e:
+                logger.debug(
+                    f"Call logs fetch by call_session_id failed for result_id={result_id}, "
+                    f"call_session_id={call_session_id}: {e}"
                 )
                 return (result_id, None, None)
 
@@ -221,14 +243,21 @@ async def list_test_runs(
         signed_urls = []
         transcript_by_result_id = {}
         recording_url_by_result_id = {}
-        if request_id_jobs or call_sid_jobs:
+        if request_id_jobs or call_sid_jobs or call_session_id_jobs:
             async with PranthoraApiClient() as pranthora_client:
-                call_logs_tasks = [
-                    fetch_call_logs_safe(pranthora_client, rid) for rid in request_id_jobs
-                ] + [
-                    fetch_call_logs_by_call_sid_safe(pranthora_client, result_id, call_sid)
-                    for (result_id, call_sid) in call_sid_jobs
-                ]
+                call_logs_tasks = (
+                    [fetch_call_logs_safe(pranthora_client, rid) for rid in request_id_jobs]
+                    + [
+                        fetch_call_logs_by_call_sid_safe(pranthora_client, result_id, call_sid)
+                        for (result_id, call_sid) in call_sid_jobs
+                    ]
+                    + [
+                        fetch_call_logs_by_call_session_id_safe(
+                            pranthora_client, result_id, call_session_id
+                        )
+                        for (result_id, call_session_id) in call_session_id_jobs
+                    ]
+                )
                 if all_url_tasks:
                     logger.info(
                         f"Generating {len(all_url_tasks)} signed URLs and {len(call_logs_tasks)} call logs in parallel..."
@@ -277,30 +306,33 @@ async def list_test_runs(
                         result.pop("wav_file_ids", None)
                         result.pop("test_case_id_for_urls", None)
 
-        # Store fetched transcripts and apply recording_url from Pranthora when DB has none
-        result_service = TestCaseResultService()
-        try:
-            for run_data in runs_map.values():
-                for result in run_data["test_case_results"]:
-                    result["_transcript"] = transcript_by_result_id.get(result["result_id"])
-                    # Use Pranthora recording_url when test_case_results.recording_file_url is missing
-                    pranthora_recording_url = recording_url_by_result_id.get(result["result_id"])
-                    if pranthora_recording_url and not result.get("recording_url"):
-                        result["recording_url"] = pranthora_recording_url
-                        if not result.get("call_recordings"):
-                            result["call_recordings"] = [
-                                {"call_number": 1, "recording_url": pranthora_recording_url}
-                            ]
-                        # Persist to DB so future fetches have recording_file_url
-                        try:
-                            await result_service.update(
-                                UUID(result["result_id"]),
-                                {"recording_file_url": pranthora_recording_url},
-                            )
-                        except Exception as e:
-                            logger.debug(f"Backfill recording_file_url for {result['result_id']}: {e}")
-        finally:
-            await result_service.close()
+        def _transcript_from_conversation_logs(conversation_logs):
+            """Fallback: build transcript list from conversation_logs entries that have role and content."""
+            if not isinstance(conversation_logs, list):
+                return None
+            out = []
+            for e in conversation_logs:
+                if isinstance(e, dict) and "role" in e and "content" in e:
+                    out.append({"role": e["role"], "content": e.get("content", "")})
+            return out if out else None
+
+        # Apply fetched transcripts and recording_url from Pranthora to in-memory results (no DB writes on list)
+        for run_data in runs_map.values():
+            for result in run_data["test_case_results"]:
+                rid = result["result_id"]
+                result["_transcript"] = transcript_by_result_id.get(rid)
+                # Fallback: use conversation_logs transcript when Pranthora returned empty for this call
+                if (result["_transcript"] is None or result["_transcript"] == []) and result.get("_conversation_logs"):
+                    fallback = _transcript_from_conversation_logs(result["_conversation_logs"])
+                    if fallback:
+                        result["_transcript"] = fallback
+                # Use Pranthora recording_url in response; do not backfill DB on list (keeps API fast)
+                pranthora_recording_url = recording_url_by_result_id.get(rid)
+                if pranthora_recording_url:
+                    result["recording_url"] = pranthora_recording_url
+                    result["call_recordings"] = [
+                        {"call_number": 1, "recording_url": pranthora_recording_url}
+                    ]
 
         # Reshape test_case_results to expose per-call details under a `calls` collection,
         # while keeping one logical test_case_result per test_case_id.
@@ -337,8 +369,10 @@ async def list_test_runs(
                 base = entry["base"]
                 per_result = entry["results"]
 
-                # Use the call_recordings from the base for mapping single recording_url per call
+                # Build one recording URL per call from each result (concurrent calls = one result per call)
                 call_recordings = base.get("call_recordings") or []
+                # If we have multiple results (concurrent calls), each result has its own recording_url
+                per_call_urls = [r.get("recording_url") for r in per_result]
 
                 calls = []
                 for idx, r in enumerate(per_result, start=1):
@@ -353,9 +387,10 @@ async def list_test_runs(
                         "completed_at": r.get("_completed_at"),
                         "transcript": r.get("_transcript"),
                     }
-
-                    # Best-effort mapping of a single recording URL to this call
-                    if call_recordings and 0 <= idx - 1 < len(call_recordings):
+                    # Use this call's result recording_url first; then call_recordings by index; then base
+                    if idx <= len(per_call_urls) and per_call_urls[idx - 1]:
+                        call_data["recording_url"] = per_call_urls[idx - 1]
+                    elif call_recordings and 0 <= idx - 1 < len(call_recordings):
                         call_data["recording_url"] = call_recordings[idx - 1].get("recording_url")
                     else:
                         call_data["recording_url"] = base.get("recording_url")
@@ -365,6 +400,9 @@ async def list_test_runs(
                 # Ensure concurrent_calls reflects the actual number of calls for this test case
                 base["concurrent_calls"] = len(calls)
                 base["calls"] = calls
+                # Remove top-level recording_url and transcript; only per-call data under calls[]
+                base.pop("recording_url", None)
+                base.pop("transcript", None)
 
                 # remove internal-only fields from base before returning
                 for bk in list(base.keys()):
