@@ -623,6 +623,10 @@ class TestExecutionService:
                 updated_result_ids[0] if updated_result_ids else created_result_ids[0]
             )
 
+            # For phone-to-phone: ensure conversation_result has agent_type so _evaluate_per_call fetches transcript by call_sid (not request_id)
+            if agent_type == "phone":
+                conversation_result["agent_type"] = "phone"
+
             # Evaluate each call separately so each test_case_result gets its own evaluation
             evaluation_results_map, call_session_ids_map = await self._evaluate_per_call(
                 test_case, conversation_result, user_agent, test_run_id,
