@@ -30,3 +30,8 @@ python main.py
 - `/v1/user-agents` - User agent configuration
 - `/v1/test-cases` - Test case management
 - `/v1/test-history` - Test run history and results
+
+
+# DEPLOYMENT 
+
+-    docker build -t olympus-echo-backend:latest_v26_02_2026 --platform linux/amd64 -f Dockerfile .
