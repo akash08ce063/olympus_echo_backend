@@ -1,4 +1,5 @@
 import inspect
+import json
 import logging
 import os
 import sys
@@ -60,7 +61,7 @@ class RichLogger:
         log_dir = Path("logs")
         log_dir.mkdir(exist_ok=True)
 
-        log_file = log_dir / f"{self.name}_{datetime.now().strftime('%Y%m%d')}.log"
+        log_file = log_dir / f"olympus_{datetime.now().strftime('%Y%m%d')}.log"
         file_handler = logging.FileHandler(log_file, encoding="utf-8")
         file_handler.setLevel(level)
         file_handler.setFormatter(self._get_file_formatter())
@@ -169,42 +170,25 @@ class RichLogger:
         return BasicFormatter(self)
 
     def _get_file_formatter(self):
-        """Formatter for file output."""
+        """Formatter for file output: one JSON object per line (same shape as Pranthora for log tracer)."""
 
         class FileFormatter(logging.Formatter):
-            def __init__(self, logger_instance):
-                super().__init__(
-                    fmt="%(asctime)s [%(levelname)s] %(caller_module)s:%(caller_funcName)s:%(caller_lineno)d [PID:%(process_id)s] [TID:%(thread_id)s] %(message)s",
-                    datefmt="%Y-%m-%d %H:%M:%S",
-                )
-                self.logger_instance = logger_instance
-
             def format(self, record):
-                # Add custom fields
                 record.request_id = getattr(record, "request_id", RequestIdManager.get())
                 record.process_id = os.getpid()
                 record.thread_id = threading.get_ident()
                 record.tag = getattr(record, "tag", None)
-
-                # Use caller context from extra (already set in _prepare_log_message)
-                # Fallback to _get_caller_context if not present (for direct logger calls)
-                if not hasattr(record, "caller_module"):
-                    context = self.logger_instance._get_caller_context()
-                    record.caller_module = context["module"]
-                    record.caller_funcName = context["funcName"]
-                    record.caller_lineno = context["lineno"]
-
-                formatted = super().format(record)
-
-                if record.request_id:
-                    formatted = f"[RID:{record.request_id}] {formatted}"
-
-                if record.tag:
-                    formatted = f"[{record.tag}] {formatted}"
-
-                return formatted
-
-        return FileFormatter(self)
+                log_data = {
+                    "timestamp": datetime.fromtimestamp(record.created).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                    "level": record.levelname,
+                    "message": record.getMessage(),
+                    "process_id": record.process_id,
+                    "thread_id": record.thread_id,
+                    "request_id": record.request_id,
+                    "tag": record.tag,
+                }
+                return json.dumps(log_data)
+        return FileFormatter()
 
     def _get_caller_context(self):
         """Get caller context information."""

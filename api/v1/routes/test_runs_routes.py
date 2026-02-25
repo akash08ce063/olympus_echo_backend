@@ -63,7 +63,18 @@ async def list_test_runs(
         )
 
         if not rpc_results:
-            return {"total": 0, "runs": []}
+            # Still need total count for pagination
+            count_filters = {"user_id": str(user_id)}
+            if suite_id:
+                count_filters["test_suite_id"] = str(suite_id)
+            total = await supabase_client.count("test_run_history", count_filters)
+            return {"total": total, "runs": []}
+
+        # Total count for pagination (same filters as RPC)
+        count_filters = {"user_id": str(user_id)}
+        if suite_id:
+            count_filters["test_suite_id"] = str(suite_id)
+        total_count = await supabase_client.count("test_run_history", count_filters)
 
         # Group results by run_id
         runs_map = {}
@@ -87,6 +98,9 @@ async def list_test_runs(
 
             # Add test case result if exists
             if row["result_id"]:
+                # Metadata from test_case_results: request_id (single, equals row id), call_sids, agent_type. Required for phone→Pranthora fetch.
+                raw_meta = row.get("metadata")
+                metadata = raw_meta if isinstance(raw_meta, dict) else {}
                 test_case_result = {
                     "result_id": str(row["result_id"]),
                     "test_case_id": str(row["test_case_id"]) if row["test_case_id"] else None,
@@ -101,6 +115,8 @@ async def list_test_runs(
                     "_started_at": row.get("result_started_at"),
                     "_completed_at": row.get("result_completed_at"),
                     "_transcript": None,
+                    "_conversation_logs": row.get("conversation_logs") or [],
+                    "_metadata": metadata,
                 }
 
                 # Extract wav_file_ids from conversation_logs for signed URL generation
@@ -123,24 +139,80 @@ async def list_test_runs(
 
                 runs_map[run_id]["test_case_results"].append(test_case_result)
 
-        # Collect all result_ids for parallel transcript fetch (result_id is request_id in Pranthora)
-        all_result_ids = []
+        # Collect identifiers for parallel transcript fetch:
+        # - Phone: use call_session_id or call_sids (never request_id - avoids 404s and extra latency).
+        # - Web/VAPI: use result_id as request_id in Pranthora.
+        request_id_jobs = []       # list[str]
+        call_sid_jobs = []         # list[tuple[result_id, call_sid]]
+        call_session_id_jobs = []  # list[tuple[result_id, call_session_id]]
         for run_data in runs_map.values():
             for result in run_data["test_case_results"]:
-                if result.get("result_id"):
-                    all_result_ids.append(result["result_id"])
+                rid = result.get("result_id")
+                if not rid:
+                    continue
+                meta = result.get("_metadata") or {}
+                call_session_id = meta.get("call_session_id")
+                call_sids = meta.get("call_sids") or []
+                # Treat as phone if we have call_session_id or call_sids (avoids request_id 404s for phone)
+                if isinstance(call_session_id, str) and call_session_id:
+                    call_session_id_jobs.append((rid, call_session_id))
+                elif call_sids:
+                    for csid in call_sids:
+                        if isinstance(csid, str) and csid:
+                            call_sid_jobs.append((rid, csid))
+                else:
+                    # Web/VAPI: use result_id as request_id
+                    request_id_jobs.append(rid)
 
-        async def fetch_transcript_safe(pranthora_client: PranthoraApiClient, req_id: str):
-            """Fetch transcript for one result_id; return (result_id, transcript_or_none). Never raise."""
+        async def fetch_call_logs_safe(pranthora_client: PranthoraApiClient, req_id: str):
+            """Fetch call logs (transcript + recording_url) for one request_id. Never raise."""
             try:
                 call_logs = await pranthora_client.get_call_logs(req_id)
-                transcript = call_logs.get("call_transcript") if call_logs else None
-                return (req_id, transcript)
+                if not call_logs:
+                    return (req_id, None, None)
+                transcript = call_logs.get("call_transcript")
+                recording_url = call_logs.get("recording_url")
+                return (req_id, transcript, recording_url)
             except Exception as e:
-                logger.debug(f"Transcript fetch failed for result_id={req_id}: {e}")
-                return (req_id, None)
+                logger.debug(f"Call logs fetch failed for result_id={req_id}: {e}")
+                return (req_id, None, None)
 
-        # Batch generate signed URLs and fetch transcripts from Pranthora in parallel
+        async def fetch_call_logs_by_call_sid_safe(
+            pranthora_client: PranthoraApiClient, result_id: str, call_sid: str
+        ):
+            """Fetch call logs (transcript + recording_url) for one call_sid, keyed by result_id. Never raise."""
+            try:
+                call_logs = await pranthora_client.get_call_logs_by_call_sid(call_sid)
+                if not call_logs:
+                    return (result_id, None, None)
+                transcript = call_logs.get("call_transcript")
+                recording_url = call_logs.get("recording_url")
+                return (result_id, transcript, recording_url)
+            except Exception as e:
+                logger.debug(
+                    f"Call logs fetch by call_sid failed for result_id={result_id}, call_sid={call_sid}: {e}"
+                )
+                return (result_id, None, None)
+
+        async def fetch_call_logs_by_call_session_id_safe(
+            pranthora_client: PranthoraApiClient, result_id: str, call_session_id: str
+        ):
+            """Fetch call logs by Pranthora call_session ID (phone). Never raise."""
+            try:
+                call_logs = await pranthora_client.get_call_logs_by_call_session_id(call_session_id)
+                if not call_logs:
+                    return (result_id, None, None)
+                transcript = call_logs.get("call_transcript")
+                recording_url = call_logs.get("recording_url")
+                return (result_id, transcript, recording_url)
+            except Exception as e:
+                logger.debug(
+                    f"Call logs fetch by call_session_id failed for result_id={result_id}, "
+                    f"call_session_id={call_session_id}: {e}"
+                )
+                return (result_id, None, None)
+
+        # Batch generate signed URLs and fetch transcripts + recording URLs from Pranthora in parallel
         all_url_tasks = []
         url_task_metadata = []  # Track metadata for each URL task in order
 
@@ -167,31 +239,44 @@ async def list_test_runs(
                             supabase_client.create_signed_url("recording_files", file_path, 3600)
                         )
 
-        # Run signed URL generation and Pranthora transcript fetches in parallel
+        # Run signed URL generation and Pranthora call-logs (transcript + recording_url) fetches in parallel
         signed_urls = []
         transcript_by_result_id = {}
-        if all_result_ids:
+        recording_url_by_result_id = {}
+        if request_id_jobs or call_sid_jobs or call_session_id_jobs:
             async with PranthoraApiClient() as pranthora_client:
-                transcript_tasks = [
-                    fetch_transcript_safe(pranthora_client, rid) for rid in all_result_ids
-                ]
+                call_logs_tasks = (
+                    [fetch_call_logs_safe(pranthora_client, rid) for rid in request_id_jobs]
+                    + [
+                        fetch_call_logs_by_call_sid_safe(pranthora_client, result_id, call_sid)
+                        for (result_id, call_sid) in call_sid_jobs
+                    ]
+                    + [
+                        fetch_call_logs_by_call_session_id_safe(
+                            pranthora_client, result_id, call_session_id
+                        )
+                        for (result_id, call_session_id) in call_session_id_jobs
+                    ]
+                )
                 if all_url_tasks:
                     logger.info(
-                        f"Generating {len(all_url_tasks)} signed URLs and {len(all_result_ids)} transcripts in parallel..."
+                        f"Generating {len(all_url_tasks)} signed URLs and {len(call_logs_tasks)} call logs in parallel..."
                     )
-                    url_results, trans_results = await asyncio.gather(
+                    url_results, logs_results = await asyncio.gather(
                         asyncio.gather(*all_url_tasks, return_exceptions=True),
-                        asyncio.gather(*transcript_tasks, return_exceptions=True),
+                        asyncio.gather(*call_logs_tasks, return_exceptions=True),
                     )
                     signed_urls = list(url_results)
                 else:
-                    logger.info(f"Fetching {len(all_result_ids)} transcripts from Pranthora in parallel...")
-                    trans_results = await asyncio.gather(*transcript_tasks, return_exceptions=True)
-                for outcome in trans_results:
+                    logger.info(f"Fetching {len(call_logs_tasks)} call logs from Pranthora in parallel...")
+                    logs_results = await asyncio.gather(*call_logs_tasks, return_exceptions=True)
+                for outcome in logs_results:
                     if isinstance(outcome, Exception):
                         continue
-                    rid, transcript = outcome
+                    rid, transcript, recording_url = outcome
                     transcript_by_result_id[rid] = transcript
+                    if recording_url:
+                        recording_url_by_result_id[rid] = recording_url
         elif all_url_tasks:
             logger.info(f"Generating {len(all_url_tasks)} signed URLs in parallel...")
             signed_urls = await asyncio.gather(*all_url_tasks, return_exceptions=True)
@@ -221,12 +306,33 @@ async def list_test_runs(
                         result.pop("wav_file_ids", None)
                         result.pop("test_case_id_for_urls", None)
 
-        # Store fetched transcripts into an internal field so we can expose them
-        # per-call below without adding outside-dependent fields to top-level
-        # objects.
+        def _transcript_from_conversation_logs(conversation_logs):
+            """Fallback: build transcript list from conversation_logs entries that have role and content."""
+            if not isinstance(conversation_logs, list):
+                return None
+            out = []
+            for e in conversation_logs:
+                if isinstance(e, dict) and "role" in e and "content" in e:
+                    out.append({"role": e["role"], "content": e.get("content", "")})
+            return out if out else None
+
+        # Apply fetched transcripts and recording_url from Pranthora to in-memory results (no DB writes on list)
         for run_data in runs_map.values():
             for result in run_data["test_case_results"]:
-                result["_transcript"] = transcript_by_result_id.get(result["result_id"])
+                rid = result["result_id"]
+                result["_transcript"] = transcript_by_result_id.get(rid)
+                # Fallback: use conversation_logs transcript when Pranthora returned empty for this call
+                if (result["_transcript"] is None or result["_transcript"] == []) and result.get("_conversation_logs"):
+                    fallback = _transcript_from_conversation_logs(result["_conversation_logs"])
+                    if fallback:
+                        result["_transcript"] = fallback
+                # Use Pranthora recording_url in response; do not backfill DB on list (keeps API fast)
+                pranthora_recording_url = recording_url_by_result_id.get(rid)
+                if pranthora_recording_url:
+                    result["recording_url"] = pranthora_recording_url
+                    result["call_recordings"] = [
+                        {"call_number": 1, "recording_url": pranthora_recording_url}
+                    ]
 
         # Reshape test_case_results to expose per-call details under a `calls` collection,
         # while keeping one logical test_case_result per test_case_id.
@@ -263,8 +369,10 @@ async def list_test_runs(
                 base = entry["base"]
                 per_result = entry["results"]
 
-                # Use the call_recordings from the base for mapping single recording_url per call
+                # Build one recording URL per call from each result (concurrent calls = one result per call)
                 call_recordings = base.get("call_recordings") or []
+                # If we have multiple results (concurrent calls), each result has its own recording_url
+                per_call_urls = [r.get("recording_url") for r in per_result]
 
                 calls = []
                 for idx, r in enumerate(per_result, start=1):
@@ -279,9 +387,10 @@ async def list_test_runs(
                         "completed_at": r.get("_completed_at"),
                         "transcript": r.get("_transcript"),
                     }
-
-                    # Best-effort mapping of a single recording URL to this call
-                    if call_recordings and 0 <= idx - 1 < len(call_recordings):
+                    # Use this call's result recording_url first; then call_recordings by index; then base
+                    if idx <= len(per_call_urls) and per_call_urls[idx - 1]:
+                        call_data["recording_url"] = per_call_urls[idx - 1]
+                    elif call_recordings and 0 <= idx - 1 < len(call_recordings):
                         call_data["recording_url"] = call_recordings[idx - 1].get("recording_url")
                     else:
                         call_data["recording_url"] = base.get("recording_url")
@@ -291,6 +400,9 @@ async def list_test_runs(
                 # Ensure concurrent_calls reflects the actual number of calls for this test case
                 base["concurrent_calls"] = len(calls)
                 base["calls"] = calls
+                # Remove top-level recording_url and transcript; only per-call data under calls[]
+                base.pop("recording_url", None)
+                base.pop("transcript", None)
 
                 # remove internal-only fields from base before returning
                 for bk in list(base.keys()):
@@ -308,7 +420,7 @@ async def list_test_runs(
             f"✅ Fetched {len(grouped_runs)} test runs with results using RPC function in milliseconds"
         )
 
-        return {"total": len(grouped_runs), "runs": grouped_runs}
+        return {"total": total_count, "runs": grouped_runs}
 
     except HTTPException:
         raise
@@ -441,60 +553,9 @@ async def get_recording_url(
             )
 
         test_case_id = result.get("test_case_id")
-        conversation_logs = result.get("conversation_logs", []) or []
-        wav_file_ids = []
-        if isinstance(conversation_logs, list):
-            for log_entry in conversation_logs:
-                if (
-                    isinstance(log_entry, dict)
-                    and log_entry.get("type") == "recording_metadata"
-                    and "wav_file_ids" in log_entry
-                ):
-                    wav_file_ids = log_entry.get("wav_file_ids", [])
-                    break
-        concurrent_calls = result.get("concurrent_calls", 1) or 1
-        supabase_client = await get_supabase_client()
-
-        if wav_file_ids and len(wav_file_ids) > 0:
-            recording_urls = []
-
-            for idx, file_id in enumerate(wav_file_ids):
-                call_num = idx + 1
-                if call_number is not None and call_num != call_number:
-                    continue
-
-                file_name = f"test_case_{test_case_id}_call_{call_num}_recording.wav"
-                file_path = f"{file_id}_{file_name}"
-
-                try:
-                    signed_url = await supabase_client.create_signed_url(
-                        "recording_files", file_path, 3600
-                    )
-                    if signed_url:
-                        recording_urls.append(
-                            {
-                                "call_number": call_num,
-                                "recording_url": signed_url,
-                                "file_id": file_id,
-                            }
-                        )
-                except Exception as e:
-                    logger.warning(f"Failed to generate URL for call {call_num}: {e}")
-
-            if not recording_urls:
-                raise HTTPException(
-                    status_code=404, detail="No recording files found for this test result"
-                )
-
-            return {
-                "result_id": str(result_id),
-                "test_case_id": str(test_case_id),
-                "concurrent_calls": concurrent_calls,
-                "recordings": recording_urls,
-                "expires_in": 3600,
-            }
 
         recording_file_url = result.get("recording_file_url")
+        # We no longer generate new Supabase URLs here; Pranthora is the source of truth.
         if not recording_file_url:
             raise HTTPException(
                 status_code=404, detail="No recording file found for this test result"
@@ -561,41 +622,8 @@ async def get_recordings_by_suite(
                         break
             concurrent_calls = r.get("concurrent_calls", 1) or 1
 
-            if wav_file_ids and len(wav_file_ids) > 0:
-                call_recordings = []
-                for idx, file_id in enumerate(wav_file_ids):
-                    call_num = idx + 1
-                    file_name = f"test_case_{test_case_id}_call_{call_num}_recording.wav"
-                    file_path = f"{file_id}_{file_name}"
-
-                    try:
-                        signed_url = await supabase_client.create_signed_url(
-                            "recording_files", file_path, 3600
-                        )
-                        if signed_url:
-                            call_recordings.append(
-                                {
-                                    "call_number": call_num,
-                                    "recording_url": signed_url,
-                                    "file_id": file_id,
-                                }
-                            )
-                    except Exception as e:
-                        logger.warning(f"Failed to generate URL for call {call_num}: {e}")
-
-                if call_recordings:
-                    recordings.append(
-                        {
-                            "result_id": r["id"],
-                            "test_case_id": test_case_id,
-                            "concurrent_calls": concurrent_calls,
-                            "call_recordings": call_recordings,
-                            "recording_url": call_recordings[0]["recording_url"],
-                            "status": r["status"],
-                            "run_id": r.get("test_run_id"),
-                        }
-                    )
-            elif r.get("recording_file_url"):
+            # Prefer Pranthora-provided recording_file_url (from call_session.metadata.recording_url)
+            if r.get("recording_file_url"):
                 recordings.append(
                     {
                         "result_id": r["id"],

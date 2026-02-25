@@ -118,11 +118,10 @@ async def list_test_runs(
     try:
         if suite_id:
             test_runs = await service.get_test_runs_by_suite(suite_id, limit, offset)
-            # For simplicity, we'll count total runs for the suite
-            total = len(test_runs) + offset  # Approximate total
+            total = await service.count_test_runs_by_suite(suite_id)
         else:
             test_runs = await service.get_test_runs_by_user(user_id, limit, offset)
-            total = len(test_runs) + offset  # Approximate total
+            total = await service.count_test_runs_by_user(user_id)
 
         return TestRunListResponse(
             test_runs=test_runs,

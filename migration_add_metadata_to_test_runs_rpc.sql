@@ -1,5 +1,6 @@
--- RPC function to fetch test runs with test case results in a single query
--- This replaces multiple sequential queries with one optimized database call
+-- Add metadata column to get_test_runs_with_results RPC so phone test results
+-- can be enriched with recording_url and transcript from Pranthora (by call_sid).
+-- Run this on Olympus Echo Supabase (SQL Editor or migration runner).
 
 CREATE OR REPLACE FUNCTION get_test_runs_with_results(
     p_user_id UUID,
@@ -8,7 +9,6 @@ CREATE OR REPLACE FUNCTION get_test_runs_with_results(
     p_offset INTEGER DEFAULT 0
 )
 RETURNS TABLE (
-    -- Test run fields
     run_id UUID,
     test_suite_id UUID,
     status TEXT,
@@ -18,7 +18,6 @@ RETURNS TABLE (
     passed_count INTEGER,
     failed_count INTEGER,
     alert_count INTEGER,
-    -- Test case result fields
     result_id UUID,
     test_case_id UUID,
     result_status TEXT,
@@ -72,7 +71,3 @@ BEGIN
     ORDER BY trh.started_at DESC, tcr.created_at ASC;
 END;
 $$;
-
--- Grant execute permission
-GRANT EXECUTE ON FUNCTION get_test_runs_with_results(UUID, UUID, INTEGER, INTEGER) TO authenticated;
-GRANT EXECUTE ON FUNCTION get_test_runs_with_results(UUID, UUID, INTEGER, INTEGER) TO anon;
