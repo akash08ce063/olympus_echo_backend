@@ -6,9 +6,11 @@ FROM python:3.12-slim
 # Set working directory
 WORKDIR /usr/src/app
 
-# Install system dependencies
+# Install system dependencies (gcc for building Python packages, portaudio for PyAudio)
 RUN apt-get update && apt-get install -y \
     gcc \
+    libportaudio2 \
+    portaudio19-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching

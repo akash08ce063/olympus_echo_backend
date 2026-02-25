@@ -3,12 +3,17 @@
 from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from api.v1.routes import (
     test_suite_routes,
-    test_suite_crud_routes, target_agents_routes,
-    user_agents_routes, test_cases_routes, test_history_routes,
-    test_execution_routes, test_runs_routes
+    test_suite_crud_routes,
+    target_agents_routes,
+    user_agents_routes,
+    test_cases_routes,
+    test_history_routes,
+    test_execution_routes,
+    test_runs_routes,
 )
 from api.v1.supabase_middleware import SupabaseAuthMiddleware
 from telemetrics.logger import logger
@@ -31,6 +36,15 @@ app = FastAPI(
 
 # Validate Bearer auth token coming from frontend using Supabase
 app.add_middleware(SupabaseAuthMiddleware)
+
+# CORS configuration: allow all origins (frontend uses Bearer tokens, not cookies)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Create v1 API router
 v1_router = APIRouter(prefix="/v1")
@@ -55,5 +69,5 @@ async def health():
     return {
         "status": "healthy",
         "service": "voice_testing_platform",
-        "version": "0.1.0"
+        "version": "0.1.0",
     }

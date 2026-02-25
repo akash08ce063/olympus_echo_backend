@@ -8,7 +8,11 @@ set -e  # Exit on any error
 # Configuration
 IMAGE_NAME="olympus-echo-backend"
 IMAGE_TAG="latest"
+# Use DOCKER_USERNAME to push to Docker Hub (e.g. code4anuj); image is tagged as username/name for push
+DOCKER_USERNAME="${DOCKER_USERNAME:-}"
 FULL_IMAGE_NAME="${IMAGE_NAME}:${IMAGE_TAG}"
+# Full name for push (includes Docker Hub username when set)
+PUSH_IMAGE_NAME="${DOCKER_USERNAME:+${DOCKER_USERNAME}/}${IMAGE_NAME}:${IMAGE_TAG}"
 CONTAINER_NAME="olympus-echo-backend-container"
 HOST_PORT=6068
 
@@ -143,6 +147,27 @@ case "${1:-run}" in
         print_success "Cleanup completed"
         ;;
 
+    "push")
+        if [ -z "${DOCKER_USERNAME}" ]; then
+            print_error "DOCKER_USERNAME is not set. Set your Docker Hub username first:"
+            echo "  export DOCKER_USERNAME=code4anuj"
+            echo "  $0 push"
+            echo ""
+            echo "Or run manually:"
+            echo "  docker tag ${FULL_IMAGE_NAME} <your-username>/olympus-echo-backend:latest"
+            echo "  docker push <your-username>/olympus-echo-backend:latest"
+            exit 1
+        fi
+        if ! docker images "${FULL_IMAGE_NAME}" | grep -q "${IMAGE_NAME}"; then
+            print_error "Image ${FULL_IMAGE_NAME} not found. Run '$0 build' first."
+            exit 1
+        fi
+        print_info "Tagging and pushing to Docker Hub as ${DOCKER_USERNAME}/olympus-echo-backend:latest..."
+        docker tag "${FULL_IMAGE_NAME}" "${DOCKER_USERNAME}/olympus-echo-backend:${IMAGE_TAG}"
+        docker push "${DOCKER_USERNAME}/olympus-echo-backend:${IMAGE_TAG}"
+        print_success "Pushed ${DOCKER_USERNAME}/olympus-echo-backend:${IMAGE_TAG}"
+        ;;
+
     "help"|"-h"|"--help")
         echo "Olympus Echo Backend Docker Management Script"
         echo ""
@@ -151,6 +176,7 @@ case "${1:-run}" in
         echo "Commands:"
         echo "  run      - Build (if needed) and run the container (default)"
         echo "  build    - Build the Docker image only"
+        echo "  push     - Push image to Docker Hub (set DOCKER_USERNAME first, e.g. code4anuj)"
         echo "  stop     - Stop the running container"
         echo "  restart  - Restart the container"
         echo "  logs     - Show container logs"
@@ -163,6 +189,7 @@ case "${1:-run}" in
         echo "  PORT     - Host port to bind (default: 6068)"
         echo "  HOST     - Container host binding (default: 0.0.0.0)"
         echo "  WORKERS  - Number of uvicorn workers (default: 1)"
+        echo "  DOCKER_USERNAME - Docker Hub username for 'push' (e.g. code4anuj)"
         ;;
 
     *)

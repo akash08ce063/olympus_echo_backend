@@ -63,9 +63,10 @@ class TargetAgentBase(BaseModel):
         description="Target agent type: custom (ws/http), vapi, retell, phone. Stored as string.",
     )
     websocket_url: Optional[str] = Field(
-        "",
+        default=None,
+        min_length=0,
         max_length=2000,
-        description="WebSocket or HTTP(S) URL for custom; empty for vapi/retell.",
+        description="WebSocket or HTTP(S) URL for custom; empty/None for vapi/retell/phone.",
     )
     sample_rate: int = Field(16000, ge=1000, le=48000, description="Audio sample rate in Hz")
     encoding: str = Field("pcm_s16le", description="Audio encoding (e.g., pcm_s16le, opus, pcm_mulaw)")
@@ -80,14 +81,22 @@ class TargetAgentBase(BaseModel):
 
     @model_validator(mode="after")
     def check_custom_has_url(self):
-        # Require non-empty websocket_url only for custom type; allow None when loading from DB (e.g. vapi/legacy rows).
-        if (self.agent_type or "custom").lower() != "custom":
+        """
+        Require non-empty websocket_url only for custom type.
+        Allow empty/None for non-custom (vapi/retell/phone) and normalize blanks to None.
+        """
+        agent_type = (self.agent_type or "custom").lower()
+        url = (self.websocket_url or "").strip()
+
+        if agent_type != "custom":
+            # For non-custom agents, store None instead of empty strings
+            self.websocket_url = url or None
             return self
-        url = self.websocket_url
-        if url is None:
-            return self  # DB may return null for non-custom or legacy rows
-        if not (url or "").strip():
+
+        if not url:
             raise ValueError("websocket_url is required when agent_type is custom")
+
+        self.websocket_url = url
         return self
 
 

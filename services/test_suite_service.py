@@ -75,7 +75,7 @@ class TestSuiteService(DatabaseService[TestSuite]):
                         user_id=ta_data['user_id'],
                         name=ta_data['name'],
                         agent_type=ta_data.get('agent_type') or 'custom',
-                        websocket_url=ta_data.get('websocket_url') or '',
+                        websocket_url=ta_data.get('websocket_url'),
                         sample_rate=ta_data.get('sample_rate', 16000),
                         encoding=ta_data.get('encoding') or 'pcm_s16le',
                         connection_metadata=ta_data.get('connection_metadata'),
