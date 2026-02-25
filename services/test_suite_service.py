@@ -70,12 +70,15 @@ class TestSuiteService(DatabaseService[TestSuite]):
                 )
                 if target_agent_result and len(target_agent_result) > 0:
                     ta_data = target_agent_result[0]
+                    ws_url = ta_data.get('websocket_url')
+                    if ws_url == '':
+                        ws_url = None
                     target_agent = TargetAgent(
                         id=ta_data['id'],
                         user_id=ta_data['user_id'],
                         name=ta_data['name'],
                         agent_type=ta_data.get('agent_type') or 'custom',
-                        websocket_url=ta_data.get('websocket_url'),
+                        websocket_url=ws_url,
                         sample_rate=ta_data.get('sample_rate', 16000),
                         encoding=ta_data.get('encoding') or 'pcm_s16le',
                         connection_metadata=ta_data.get('connection_metadata'),

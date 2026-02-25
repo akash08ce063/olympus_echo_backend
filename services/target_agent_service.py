@@ -13,6 +13,12 @@ from models.test_suite_models import TargetAgentCreate, TargetAgentUpdate, Targe
 from telemetrics.logger import logger
 
 
+def _normalize_websocket_url(row: dict) -> None:
+    """Ensure empty string websocket_url is None so Pydantic validation passes (e.g. in Docker/production)."""
+    if row.get("websocket_url") == "":
+        row["websocket_url"] = None
+
+
 class TargetAgentService(DatabaseService[TargetAgent]):
     """Service for target agent CRUD operations."""
 
@@ -29,6 +35,7 @@ class TargetAgentService(DatabaseService[TargetAgent]):
         """Get a target agent by ID."""
         result = await self.get_by_id(agent_id)
         if result:
+            _normalize_websocket_url(result)
             return TargetAgent(**result)
         return None
 
@@ -37,6 +44,8 @@ class TargetAgentService(DatabaseService[TargetAgent]):
     ) -> List[TargetAgent]:
         """Get target agents for a user."""
         results = await self.get_all_by_user(user_id, limit, offset)
+        for r in results:
+            _normalize_websocket_url(r)
         return [TargetAgent(**result) for result in results]
 
     async def update_target_agent(self, agent_id: UUID, data: TargetAgentUpdate) -> bool:
