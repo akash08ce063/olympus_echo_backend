@@ -442,7 +442,7 @@ class PranthoraApiClient:
         """
         try:
             url = f"{self.base_url}/api/v1/outbound-calls"
-            logger.info(f"URLLL-->> {url}")
+
             params = {
                 "phoneNumber": target_phone_number,
                 "provider": "twilio",
@@ -452,7 +452,7 @@ class PranthoraApiClient:
                 f"Initiating phone call via Pranthora: target={target_phone_number}, from_number={from_number}"
             )
             response = await self.client.post(url, params=params)
-            print("RESPONSEEE-->>", response)
+            
             if response.status_code in (200, 201):
                 return response.json()
             error_detail = response.text
@@ -473,7 +473,7 @@ class PranthoraApiClient:
             from_phone_number: Twilio phone number used as the caller ID.
         """
         try:
-            url = f"{self.base_url}/calls/end"
+            url = f"{self.base_url}/api/v1/outbound-calls/end"
             params = {
                 "call_sid": call_sid,
                 "from_phone_number": from_phone_number,
