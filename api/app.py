@@ -35,11 +35,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Validate Bearer auth token coming from frontend using Supabase
-app.add_middleware(SupabaseAuthMiddleware)
-
 # Proxy middleware
 app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+
+# Validate Bearer auth token coming from frontend using Supabase
+app.add_middleware(SupabaseAuthMiddleware)
 
 # CORS configuration: allow all origins (frontend uses Bearer tokens, not cookies)
 app.add_middleware(
