@@ -432,7 +432,7 @@ class PranthoraApiClient:
             logger.error(f"Error checking agent phone number mappings in Pranthora: {e}")
             raise
 
-    async def initiate_phone_call(self, target_phone_number: str, pranthora_agent_id: str) -> Dict[str, Any]:
+    async def initiate_phone_call(self, target_phone_number: str, from_number: str) -> Dict[str, Any]:
         """
         Initiate an outbound phone call via Pranthora SDK /calls endpoint.
 
@@ -441,15 +441,18 @@ class PranthoraApiClient:
             pranthora_agent_id: Pranthora agent ID for the user agent (sent as agent_id query param).
         """
         try:
-            url = f"{self.base_url}/calls"
+            url = f"{self.base_url}/api/v1/outbound-calls"
+
             params = {
                 "phoneNumber": target_phone_number,
-                "agent_id": pranthora_agent_id,
+                "provider": "twilio",
+                "from_number": from_number
             }
             logger.info(
-                f"Initiating phone call via Pranthora: target={target_phone_number}, agent_id={pranthora_agent_id}"
+                f"Initiating phone call via Pranthora: target={target_phone_number}, from_number={from_number}"
             )
             response = await self.client.post(url, params=params)
+            
             if response.status_code in (200, 201):
                 return response.json()
             error_detail = response.text
@@ -470,7 +473,7 @@ class PranthoraApiClient:
             from_phone_number: Twilio phone number used as the caller ID.
         """
         try:
-            url = f"{self.base_url}/calls/end"
+            url = f"{self.base_url}/api/v1/outbound-calls/end"
             params = {
                 "call_sid": call_sid,
                 "from_phone_number": from_phone_number,

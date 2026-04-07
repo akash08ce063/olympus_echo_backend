@@ -893,6 +893,7 @@ class TestExecutionService:
 
             # Validate user agent phone_numbers config
             phone_cfg = getattr(user_agent, "phone_numbers", None) or {}
+            
             phone_list = []
             if isinstance(phone_cfg, dict):
                 raw_list = phone_cfg.get("phone_numbers") or []
@@ -957,7 +958,7 @@ class TestExecutionService:
                 try:
                     resp = await self.pranthora_client.initiate_phone_call(
                         target_phone_number=target_phone,
-                        pranthora_agent_id=user_agent.pranthora_agent_id,
+                        from_number=phone_list[idx],
                     )
                     call_results.append(resp)
                     logger.info(
