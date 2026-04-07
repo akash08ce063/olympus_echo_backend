@@ -3,6 +3,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, FastAPI
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.v1.routes import (
@@ -33,6 +34,9 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# Proxy middleware
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 
 # Validate Bearer auth token coming from frontend using Supabase
 app.add_middleware(SupabaseAuthMiddleware)
