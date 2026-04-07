@@ -893,7 +893,7 @@ class TestExecutionService:
 
             # Validate user agent phone_numbers config
             phone_cfg = getattr(user_agent, "phone_numbers", None) or {}
-            print("phone_cfg-->>", phone_cfg)
+            
             phone_list = []
             if isinstance(phone_cfg, dict):
                 raw_list = phone_cfg.get("phone_numbers") or []
